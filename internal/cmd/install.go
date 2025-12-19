@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,16 +32,16 @@ var installCmd = &cobra.Command{
 
 A harness is the top-level directory where Gas Town is installed. It contains:
   - CLAUDE.md            Mayor role context (Mayor runs from harness root)
-  - mayor/               Mayor config, state, and mail
+  - mayor/               Mayor config and state
   - rigs/                Managed rig clones (created by 'gt rig add')
-  - .beads/redirect      (optional) Default beads location
+  - .beads/              Town-level beads DB (mayor mail, coordination)
 
 If path is omitted, uses the current directory.
 
 Examples:
   gt install ~/gt                         # Create harness at ~/gt
   gt install . --name my-workspace        # Initialize current dir
-  gt install ~/gt --no-beads              # Skip .beads/redirect setup
+  gt install ~/gt --no-beads              # Skip .beads/ initialization
   gt install ~/gt --git                   # Also init git with .gitignore
   gt install ~/gt --github=user/repo      # Also create GitHub repo`,
 	Args: cobra.MaximumNArgs(1),
@@ -49,7 +51,7 @@ Examples:
 func init() {
 	installCmd.Flags().BoolVarP(&installForce, "force", "f", false, "Overwrite existing harness")
 	installCmd.Flags().StringVarP(&installName, "name", "n", "", "Town name (defaults to directory name)")
-	installCmd.Flags().BoolVar(&installNoBeads, "no-beads", false, "Skip .beads/redirect setup")
+	installCmd.Flags().BoolVar(&installNoBeads, "no-beads", false, "Skip town beads initialization")
 	installCmd.Flags().BoolVar(&installGit, "git", false, "Initialize git with .gitignore")
 	installCmd.Flags().StringVar(&installGitHub, "github", "", "Create GitHub repo (format: owner/repo)")
 	installCmd.Flags().BoolVar(&installPrivate, "private", false, "Make GitHub repo private (use with --github)")
@@ -140,19 +142,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("   ✓ Created rigs/\n")
 
-	// Create mayor mail directory
-	mailDir := filepath.Join(mayorDir, "mail")
-	if err := os.MkdirAll(mailDir, 0755); err != nil {
-		return fmt.Errorf("creating mail directory: %w", err)
-	}
-
-	// Create empty inbox
-	inboxPath := filepath.Join(mailDir, "inbox.jsonl")
-	if err := os.WriteFile(inboxPath, []byte{}, 0644); err != nil {
-		return fmt.Errorf("creating inbox: %w", err)
-	}
-	fmt.Printf("   ✓ Created mayor/mail/inbox.jsonl\n")
-
 	// Create mayor state.json
 	mayorState := &config.AgentState{
 		Role:       "mayor",
@@ -171,20 +160,14 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   ✓ Created CLAUDE.md\n")
 	}
 
-	// Create .beads directory with redirect (optional)
+	// Initialize town-level beads database (optional)
+	// Town beads (gm- prefix) stores mayor mail, cross-rig coordination, and handoffs.
+	// Rig beads are separate and have their own prefixes.
 	if !installNoBeads {
-		beadsDir := filepath.Join(absPath, ".beads")
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			fmt.Printf("   %s Could not create .beads/: %v\n", style.Dim.Render("⚠"), err)
+		if err := initTownBeads(absPath); err != nil {
+			fmt.Printf("   %s Could not initialize town beads: %v\n", style.Dim.Render("⚠"), err)
 		} else {
-			// Create redirect file with placeholder
-			redirectPath := filepath.Join(beadsDir, "redirect")
-			redirectContent := "# Redirect to your main rig's beads\n# Example: gastown/.beads\n"
-			if err := os.WriteFile(redirectPath, []byte(redirectContent), 0644); err != nil {
-				fmt.Printf("   %s Could not create redirect: %v\n", style.Dim.Render("⚠"), err)
-			} else {
-				fmt.Printf("   ✓ Created .beads/redirect (configure for your main rig)\n")
-			}
+			fmt.Printf("   ✓ Initialized .beads/ (town-level beads with gm- prefix)\n")
 		}
 	}
 
@@ -199,35 +182,16 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Harness created successfully!\n", style.Bold.Render("✓"))
 	fmt.Println()
 	fmt.Println("Next steps:")
+	step := 1
 	if !installGit && installGitHub == "" {
-		fmt.Printf("  1. Initialize git: %s\n", style.Dim.Render("gt git-init"))
+		fmt.Printf("  %d. Initialize git: %s\n", step, style.Dim.Render("gt git-init"))
+		step++
 	}
-	fmt.Printf("  %s. Add a rig: %s\n", nextStepNum(installGit || installGitHub != ""), style.Dim.Render("gt rig add <name> <git-url>"))
-	fmt.Printf("  %s. Configure beads redirect: %s\n", nextStepNum2(installGit || installGitHub != ""), style.Dim.Render("edit .beads/redirect"))
-	fmt.Printf("  %s. Start the Mayor: %s\n", nextStepNum3(installGit || installGitHub != ""), style.Dim.Render("cd "+absPath+" && gt prime"))
+	fmt.Printf("  %d. Add a rig: %s\n", step, style.Dim.Render("gt rig add <name> <git-url>"))
+	step++
+	fmt.Printf("  %d. Start the Mayor: %s\n", step, style.Dim.Render("cd "+absPath+" && gt prime"))
 
 	return nil
-}
-
-func nextStepNum(gitDone bool) string {
-	if gitDone {
-		return "1"
-	}
-	return "2"
-}
-
-func nextStepNum2(gitDone bool) string {
-	if gitDone {
-		return "2"
-	}
-	return "3"
-}
-
-func nextStepNum3(gitDone bool) string {
-	if gitDone {
-		return "3"
-	}
-	return "4"
 }
 
 func createMayorCLAUDEmd(harnessRoot, townRoot string) error {
@@ -257,4 +221,22 @@ func writeJSON(path string, data interface{}) error {
 		return err
 	}
 	return os.WriteFile(path, content, 0644)
+}
+
+// initTownBeads initializes town-level beads database using bd init.
+// Town beads use the "gm-" prefix for mayor mail and cross-rig coordination.
+func initTownBeads(townPath string) error {
+	// Run: bd init --prefix gm
+	cmd := exec.Command("bd", "init", "--prefix", "gm")
+	cmd.Dir = townPath
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check if beads is already initialized
+		if strings.Contains(string(output), "already initialized") {
+			return nil // Already initialized is fine
+		}
+		return fmt.Errorf("bd init failed: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
 }
