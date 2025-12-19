@@ -122,15 +122,11 @@ func startMayorSession(t *tmux.Tmux) error {
 	// Set environment
 	t.SetEnvironment(MayorSessionName, "GT_ROLE", "mayor")
 
-	// Launch Claude with full permissions (Mayor is trusted)
-	// Use exec to replace shell - when Claude exits, session closes
-	if err := t.SendKeys(MayorSessionName, "exec claude --dangerously-skip-permissions"); err != nil {
+	// Launch Claude in a respawn loop - session survives restarts
+	// The startup hook handles 'gt prime' automatically
+	loopCmd := `while true; do echo "🏛️  Starting Mayor session..."; claude --dangerously-skip-permissions; echo ""; echo "Mayor exited. Restarting in 2s... (Ctrl-C to stop)"; sleep 2; done`
+	if err := t.SendKeys(MayorSessionName, loopCmd); err != nil {
 		return fmt.Errorf("sending command: %w", err)
-	}
-
-	// Prime after a delay
-	if err := t.SendKeysDelayed(MayorSessionName, "gt prime", 2000); err != nil {
-		fmt.Printf("Warning: Could not send prime command: %v\n", err)
 	}
 
 	return nil
@@ -172,27 +168,13 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 	if !running {
-		// Auto-start if not running (matches Python behavior)
+		// Auto-start if not running
 		fmt.Println("Mayor session not running, starting...")
 		if err := startMayorSession(t); err != nil {
 			return err
 		}
-	} else {
-		// Session exists - check if Claude is still running
-		// (With exec this rarely triggers, but handles edge cases)
-		paneCmd, err := t.GetPaneCommand(MayorSessionName)
-		if err == nil && isMayorShellCommand(paneCmd) {
-			// Claude has exited, restart it with exec
-			fmt.Println("Claude exited, restarting...")
-			if err := t.SendKeys(MayorSessionName, "exec claude --dangerously-skip-permissions"); err != nil {
-				return fmt.Errorf("restarting claude: %w", err)
-			}
-			// Prime after restart
-			if err := t.SendKeysDelayed(MayorSessionName, "gt prime", 2000); err != nil {
-				fmt.Printf("Warning: Could not send prime command: %v\n", err)
-			}
-		}
 	}
+	// Session uses a respawn loop, so Claude restarts automatically if it exits
 
 	// Use exec to replace current process with tmux attach
 	tmuxPath, err := exec.LookPath("tmux")
@@ -201,17 +183,6 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	return execCommand(tmuxPath, "attach-session", "-t", MayorSessionName)
-}
-
-// isMayorShellCommand checks if the command is a shell (meaning Claude has exited).
-func isMayorShellCommand(cmd string) bool {
-	shells := []string{"bash", "zsh", "sh", "fish", "tcsh", "ksh"}
-	for _, shell := range shells {
-		if cmd == shell {
-			return true
-		}
-	}
-	return false
 }
 
 // execCommand replaces the current process with the given command.
@@ -266,21 +237,19 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 func runMayorRestart(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 
-	// Stop if running
 	running, err := t.HasSession(MayorSessionName)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
+
 	if running {
-		fmt.Println("Stopping Mayor session...")
+		// Graceful restart: send Ctrl-C to exit Claude, loop will restart it
+		fmt.Println("Restarting Mayor (sending Ctrl-C to trigger respawn loop)...")
 		t.SendKeysRaw(MayorSessionName, "C-c")
-		time.Sleep(100 * time.Millisecond)
-		if err := t.KillSession(MayorSessionName); err != nil {
-			return fmt.Errorf("killing session: %w", err)
-		}
-		fmt.Printf("%s Mayor session stopped.\n", style.Bold.Render("✓"))
+		fmt.Printf("%s Mayor will restart automatically. Session stays attached.\n", style.Bold.Render("✓"))
+		return nil
 	}
 
-	// Start fresh
+	// Not running, start fresh
 	return runMayorStart(cmd, args)
 }
