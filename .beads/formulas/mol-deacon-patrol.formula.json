@@ -36,7 +36,7 @@
       "id": "session-gc",
       "title": "Clean dead sessions",
       "needs": ["orphan-check"],
-      "description": "Clean dead sessions and orphaned state.\n\nGarbage collect terminated sessions and orphaned artifacts:\n\n## 1. Clean orphaned sessions and processes\n\n```bash\n# Check for orphans (dry run)\ngt doctor -v\n\n# Fix orphaned sessions and processes\ngt doctor --fix\n```\n\nThis handles:\n- Orphaned tmux sessions (gt-* not matching valid rig/role patterns)\n- Orphaned Claude processes (no tmux parent)\n\n## 2. Clean orphaned wisps\n\n```bash\n# Clean wisps older than 1 hour (default threshold)\nbd --no-daemon wisp gc\n\n# Or with custom age threshold\nbd --no-daemon wisp gc --age 2h\n\n# Preview what would be cleaned\nbd --no-daemon wisp gc --dry-run\n```\n\nThe `--no-daemon` flag is required when the bd daemon is running, since wisp gc needs direct database access.\n\n## Notes\n\n- Preserve audit trail - only clean confirmed dead sessions\n- Old logs and temp files: not yet implemented\n- Completed molecule archival: handled by bd mol squash/burn"
+      "description": "Clean dead sessions and orphaned state.\n\nRun `gt doctor --fix` to handle all cleanup:\n\n```bash\n# Preview what needs cleaning\ngt doctor -v\n\n# Fix everything\ngt doctor --fix\n```\n\nThis handles:\n- **orphan-sessions**: Kill orphaned tmux sessions (gt-* not matching valid patterns)\n- **orphan-processes**: Kill orphaned Claude processes (no tmux parent)\n- **wisp-gc**: Garbage collect abandoned wisps (>1h old)\n\nAll cleanup is handled by doctor checks - no need to run separate commands."
     },
     {
       "id": "context-check",

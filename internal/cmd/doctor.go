@@ -24,6 +24,11 @@ var doctorCmd = &cobra.Command{
 Doctor checks for common configuration issues, missing files,
 and other problems that could affect workspace operation.
 
+Cleanup checks (fixable):
+  - orphan-sessions          Detect orphaned tmux sessions
+  - orphan-processes         Detect orphaned Claude processes
+  - wisp-gc                  Detect and clean abandoned wisps (>1h)
+
 Patrol checks:
   - patrol-molecules-exist   Verify patrol molecules exist
   - patrol-hooks-wired       Verify daemon triggers patrols
@@ -66,6 +71,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	d.Register(doctor.NewBeadsDatabaseCheck())
 	d.Register(doctor.NewOrphanSessionCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
+	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewBranchCheck())
 	d.Register(doctor.NewBeadsSyncOrphanCheck())
 	d.Register(doctor.NewIdentityCollisionCheck())
