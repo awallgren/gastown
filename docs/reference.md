@@ -21,6 +21,7 @@ Technical reference for Gas Town internals. Read the README first.
 ```
 
 **Key points:**
+
 - Rig root is a container, not a clone
 - `.repo.git/` is bare - refinery and polecats are worktrees
 - Mayor clone holds canonical `.beads/`, others inherit via redirect
@@ -50,6 +51,7 @@ Debug routing: `BD_DEBUG_ROUTING=1 bd show <id>`
 ## Configuration
 
 ### Rig Config (`config.json`)
+
 ```json
 {
   "type": "rig",
@@ -60,6 +62,7 @@ Debug routing: `BD_DEBUG_ROUTING=1 bd show <id>`
 ```
 
 ### Settings (`settings/config.json`)
+
 ```json
 {
   "theme": "desert",
@@ -69,6 +72,7 @@ Debug routing: `BD_DEBUG_ROUTING=1 bd show <id>`
 ```
 
 ### Runtime (`.runtime/` - gitignored)
+
 Process state, PIDs, ephemeral data.
 
 ## Formula Format
@@ -91,6 +95,7 @@ needs = ["other-step"]      # Dependencies
 ```
 
 **Composition:**
+
 ```toml
 extends = ["base-formula"]
 
@@ -165,6 +170,7 @@ gt mol step done <step>      # Complete a molecule step
 ## Agent Lifecycle
 
 ### Polecat Shutdown
+
 ```
 1. Complete work steps
 2. bd mol squash (create digest)
@@ -175,6 +181,7 @@ gt mol step done <step>      # Complete a molecule step
 ```
 
 ### Session Cycling
+
 ```
 1. Agent notices context filling
 2. gt handoff (sends mail to self)
@@ -200,6 +207,7 @@ gt mol step done <step>      # Complete a molecule step
 ## CLI Reference
 
 ### Town Management
+
 ```bash
 gt install [path]            # Create town
 gt install --git             # With git init
@@ -208,13 +216,15 @@ gt doctor --fix              # Auto-repair
 ```
 
 ### Rig Management
+
 ```bash
-gt rig add <name> --remote=<url>
+gt rig add <name> <url>
 gt rig list
 gt rig remove <name>
 ```
 
 ### Convoy Management (Primary Dashboard)
+
 ```bash
 gt convoy list                          # Dashboard of active convoys
 gt convoy status [convoy-id]            # Show progress (🚚 hq-cv-*)
@@ -227,6 +237,7 @@ gt convoy list --status=closed          # Only landed convoys
 Note: "Swarm" is ephemeral (workers on a convoy's issues). See [Convoys](convoy.md).
 
 ### Work Assignment
+
 ```bash
 # Standard workflow: convoy first, then sling
 gt convoy create "Feature X" gt-abc gt-def
@@ -238,6 +249,7 @@ gt sling <bead> <rig>                    # Auto-convoy for dashboard visibility
 ```
 
 ### Communication
+
 ```bash
 gt mail inbox
 gt mail read <id>
@@ -246,6 +258,7 @@ gt mail send --human -s "..."    # To overseer
 ```
 
 ### Escalation
+
 ```bash
 gt escalate "topic"              # Default: MEDIUM severity
 gt escalate -s CRITICAL "msg"    # Urgent, immediate attention
@@ -256,6 +269,7 @@ gt escalate -s MEDIUM "msg" -m "Details..."
 See [escalation.md](escalation.md) for full protocol.
 
 ### Sessions
+
 ```bash
 gt handoff                   # Request cycle (context-aware)
 gt handoff --shutdown        # Terminate (polecats)
@@ -269,9 +283,11 @@ gt seance --talk <id> -p "Where is X?"  # One-shot question
 
 **Session Discovery**: Each session has a startup nudge that becomes searchable
 in Claude's `/resume` picker:
+
 ```
 [GAS TOWN] recipient <- sender • timestamp • topic[:mol-id]
 ```
+
 Example: `[GAS TOWN] gastown/crew/gus <- human • 2025-12-30T15:42 • restart`
 
 **IMPORTANT**: Always use `gt nudge` to send messages to Claude sessions.
@@ -279,6 +295,7 @@ Never use raw `tmux send-keys` - it doesn't handle Claude's input correctly.
 `gt nudge` uses literal mode + debounce + separate Enter for reliable delivery.
 
 ### Emergency
+
 ```bash
 gt stop --all                # Kill all sessions
 gt stop --rig <name>         # Kill rig sessions
@@ -327,6 +344,7 @@ Plugins are molecules with specific labels:
 ```
 
 Patrol molecules bond plugins dynamically:
+
 ```bash
 bd mol bond mol-security-scan $PATROL_ID --var scope="$SCOPE"
 ```

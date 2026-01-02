@@ -111,7 +111,7 @@ gt install ~/gt
 
 ```bash
 # Add your first project
-gt rig add myproject --remote=https://github.com/you/repo.git
+gt rig add myproject https://github.com/you/repo.git
 
 # This clones the repo and sets up:
 #   ~/gt/myproject/

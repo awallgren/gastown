@@ -268,7 +268,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  └── polecats/\n")
 
 	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  gt crew add <name> %s   # Create your workspace\n", name)
+	fmt.Printf("  gt crew add <name> --rig %s   # Create your workspace\n", name)
 	fmt.Printf("  cd %s/crew/<name>       # Work in your clone\n", filepath.Join(townRoot, name))
 
 	return nil

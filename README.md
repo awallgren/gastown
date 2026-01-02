@@ -29,7 +29,7 @@ go install github.com/steveyegge/gastown/cmd/gt@latest
 gt install ~/gt
 
 # Add a project
-gt rig add myproject --remote=https://github.com/you/repo.git
+gt rig add myproject https://github.com/you/repo.git
 
 # Create a convoy and sling work (standard workflow)
 gt convoy create "Feature X" issue-123 issue-456 --notify --human
@@ -58,7 +58,9 @@ Town (~/gt/)              Your workspace
 ## Workflows
 
 ### Minimal (No Tmux)
+
 Run individual Claude Code instances manually. Gas Town just tracks state.
+
 ```bash
 gt convoy create "Fix bugs" issue-123  # Create convoy (sling auto-creates if skipped)
 gt sling issue-123 myproject           # Assign to worker
@@ -67,7 +69,9 @@ gt convoy list                         # Check progress
 ```
 
 ### Full Stack (Tmux)
+
 Agents run in tmux sessions. Daemon manages lifecycle.
+
 ```bash
 gt daemon start                        # Start lifecycle manager
 gt convoy create "Feature X" issue-123 issue-456
@@ -77,7 +81,9 @@ gt convoy list                         # Dashboard view
 ```
 
 ### Pick Your Roles
+
 Gas Town is modular. Run what you need:
+
 - **Polecats only**: Manual spawning, no monitoring
 - **+ Witness**: Automatic worker lifecycle, stuck detection
 - **+ Refinery**: Merge queue, code review
