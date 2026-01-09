@@ -649,6 +649,9 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 			if !entry.IsDir() {
 				continue
 			}
+			if strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
 			polecatName := entry.Name()
 			sessionName := fmt.Sprintf("gt-%s-%s", r.Name, polecatName)
 			totalChecked++

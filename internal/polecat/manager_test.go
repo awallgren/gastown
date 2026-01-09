@@ -194,6 +194,9 @@ func TestListWithPolecats(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(root, "polecats", ".claude"), 0755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
 	// Create mayor/rig for beads path
 	mayorRig := filepath.Join(root, "mayor", "rig")
 	if err := os.MkdirAll(mayorRig, 0755); err != nil {

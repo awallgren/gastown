@@ -451,6 +451,9 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 		if !entry.IsDir() {
 			continue
 		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
 
 		polecatName := entry.Name()
 		polecatPath := filepath.Join(polecatsDir, polecatName)

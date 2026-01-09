@@ -139,7 +139,7 @@ func discoverHooks(townRoot string) ([]HookInfo, error) {
 		polecatsDir := filepath.Join(rigPath, "polecats")
 		if polecats, err := os.ReadDir(polecatsDir); err == nil {
 			for _, p := range polecats {
-				if p.IsDir() {
+				if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
 					locations = append(locations, struct {
 						path  string
 						agent string
