@@ -173,6 +173,14 @@ func (m *Manager) Add(name string, createBranch bool) (*CrewWorker, error) {
 		fmt.Printf("Warning: could not set up shared beads: %v\n", err)
 	}
 
+	// Provision PRIME.md with Gas Town context for this worker.
+	// This is the fallback if SessionStart hook fails - ensures crew workers
+	// always have GUPP and essential Gas Town context.
+	if err := beads.ProvisionPrimeMDForWorktree(crewPath); err != nil {
+		// Non-fatal - crew can still work via hook, warn but don't fail
+		fmt.Printf("Warning: could not provision PRIME.md: %v\n", err)
+	}
+
 	// Copy overlay files from .runtime/overlay/ to crew root.
 	// This allows services to have .env and other config files at their root.
 	if err := rig.CopyOverlay(m.rig.Path, crewPath); err != nil {

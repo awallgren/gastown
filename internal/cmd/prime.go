@@ -83,10 +83,6 @@ func init() {
 type RoleContext = RoleInfo
 
 func runPrime(cmd *cobra.Command, args []string) error {
-	if !state.IsEnabled() {
-		return nil
-	}
-
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
@@ -96,7 +92,17 @@ func runPrime(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("finding workspace: %w", err)
 	}
+
+	// "Discover, Don't Track" principle:
+	// - If we're in a workspace, proceed - the workspace's existence IS the enable signal
+	// - If we're NOT in a workspace, check the global enabled state
+	// This ensures a missing/stale state file doesn't break workspace users
 	if townRoot == "" {
+		// Not in a workspace - check global enabled state
+		// (This matters for hooks that might run from random directories)
+		if !state.IsEnabled() {
+			return nil // Silent exit - not in workspace and not enabled
+		}
 		return fmt.Errorf("not in a Gas Town workspace")
 	}
 
@@ -116,6 +122,9 @@ func runPrime(cmd *cobra.Command, args []string) error {
 			fmt.Printf("[source:%s]\n", source)
 		}
 	}
+
+	// Check for handoff marker (prevents handoff loop bug)
+	checkHandoffMarker(cwd)
 
 	// Get role using env-aware detection
 	roleInfo, err := GetRoleWithContext(cwd, townRoot)
@@ -1631,4 +1640,39 @@ func readSessionFile(dir string) string {
 		return strings.TrimSpace(lines[0])
 	}
 	return ""
+}
+
+// checkHandoffMarker checks for a handoff marker file and outputs a warning if found.
+// This prevents the "handoff loop" bug where a new session sees /handoff in context
+// and incorrectly runs it again. The marker tells the new session: "handoff is DONE,
+// the /handoff you see in context was from YOUR PREDECESSOR, not a request for you."
+func checkHandoffMarker(workDir string) {
+	markerPath := filepath.Join(workDir, constants.DirRuntime, constants.FileHandoffMarker)
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		// No marker = not post-handoff, normal startup
+		return
+	}
+
+	// Marker found - this is a post-handoff session
+	prevSession := strings.TrimSpace(string(data))
+
+	// Remove the marker FIRST so we don't warn twice
+	_ = os.Remove(markerPath)
+
+	// Output prominent warning
+	fmt.Println()
+	fmt.Println(style.Bold.Render("╔══════════════════════════════════════════════════════════════════╗"))
+	fmt.Println(style.Bold.Render("║  ✅ HANDOFF COMPLETE - You are the NEW session                   ║"))
+	fmt.Println(style.Bold.Render("╚══════════════════════════════════════════════════════════════════╝"))
+	fmt.Println()
+	if prevSession != "" {
+		fmt.Printf("Your predecessor (%s) handed off to you.\n", prevSession)
+	}
+	fmt.Println()
+	fmt.Println(style.Bold.Render("⚠️  DO NOT run /handoff - that was your predecessor's action."))
+	fmt.Println("   The /handoff you see in context is NOT a request for you.")
+	fmt.Println()
+	fmt.Println("Instead: Check your hook (`gt mol status`) and mail (`gt mail inbox`).")
+	fmt.Println()
 }
