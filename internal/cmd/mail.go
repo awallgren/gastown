@@ -154,15 +154,21 @@ Examples:
 }
 
 var mailReadCmd = &cobra.Command{
-	Use:   "read <message-id>",
+	Use:   "read <message-id|index>",
 	Short: "Read a message",
 	Long: `Read a specific message (does not mark as read).
 
-The message ID can be found from 'gt mail inbox'.
+You can specify a message by its ID or by its numeric index from the inbox.
+The index corresponds to the number shown in 'gt mail inbox' (1-based).
+
+Examples:
+  gt mail read hq-abc123    # Read by message ID
+  gt mail read 3            # Read the 3rd message in inbox
+
 Use 'gt mail mark-read' to mark messages as read.`,
 	Aliases: []string{"show"},
-	Args: cobra.ExactArgs(1),
-	RunE: runMailRead,
+	Args:    cobra.ExactArgs(1),
+	RunE:    runMailRead,
 }
 
 var mailPeekCmd = &cobra.Command{

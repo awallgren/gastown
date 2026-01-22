@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -80,7 +81,7 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		readMarker := "●"
 		if msg.Read {
 			readMarker = "○"
@@ -98,11 +99,13 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 			wispMarker = " " + style.Dim.Render("(wisp)")
 		}
 
-		fmt.Printf("  %s %s%s%s%s\n", readMarker, msg.Subject, typeMarker, priorityMarker, wispMarker)
-		fmt.Printf("    %s from %s\n",
+		// Show 1-based index for easy reference with 'gt mail read <n>'
+		indexStr := style.Dim.Render(fmt.Sprintf("%d.", i+1))
+		fmt.Printf("  %s %s %s%s%s%s\n", indexStr, readMarker, msg.Subject, typeMarker, priorityMarker, wispMarker)
+		fmt.Printf("      %s from %s\n",
 			style.Dim.Render(msg.ID),
 			msg.From)
-		fmt.Printf("    %s\n",
+		fmt.Printf("      %s\n",
 			style.Dim.Render(msg.Timestamp.Format("2006-01-02 15:04")))
 	}
 
@@ -111,9 +114,9 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 
 func runMailRead(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		return errors.New("msgID argument required")
+		return errors.New("message ID or index required")
 	}
-	msgID := args[0]
+	msgRef := args[0]
 
 	// Determine which inbox
 	address := detectSender()
@@ -121,6 +124,22 @@ func runMailRead(cmd *cobra.Command, args []string) error {
 	mailbox, err := getMailbox(address)
 	if err != nil {
 		return err
+	}
+
+	// Check if the argument is a numeric index (1-based)
+	var msgID string
+	if idx, err := strconv.Atoi(msgRef); err == nil && idx > 0 {
+		// Numeric index: resolve to message ID by listing inbox
+		messages, err := mailbox.List()
+		if err != nil {
+			return fmt.Errorf("listing messages: %w", err)
+		}
+		if idx > len(messages) {
+			return fmt.Errorf("index %d out of range (inbox has %d messages)", idx, len(messages))
+		}
+		msgID = messages[idx-1].ID
+	} else {
+		msgID = msgRef
 	}
 
 	msg, err := mailbox.Get(msgID)
