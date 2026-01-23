@@ -97,7 +97,8 @@ Git-backed issue tracking system that stores work state as structured data.
 
 ```bash
 # Install Gas Town
-$ brew install gastown                                    # Homebrew
+$ brew tap steveyegge/gastown && brew install gt         # Homebrew (recommended)
+$ npm install -g @gastown/gt                              # npm
 $ go install github.com/steveyegge/gastown/cmd/gt@latest  # From source
 
 # If using go install, add Go binaries to PATH (add to ~/.zshrc or ~/.bashrc)
