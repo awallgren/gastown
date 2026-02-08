@@ -845,3 +845,158 @@ func verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 	// Commit is not on any remote's default branch
 	return false, nil
 }
+
+// ZombieResult describes a detected zombie polecat and the action taken.
+type ZombieResult struct {
+	PolecatName string
+	AgentState  string
+	HookBead    string
+	Action      string // "auto-nuked", "escalated", "cleanup-wisp-created"
+	Error       error
+}
+
+// DetectZombiePolecatsResult contains the results of a zombie detection sweep.
+type DetectZombiePolecatsResult struct {
+	Checked int
+	Zombies []ZombieResult
+}
+
+// DetectZombiePolecats cross-references polecat agent state with tmux session
+// existence to find zombie polecats. A zombie is a polecat whose tmux session
+// is dead but whose agent bead still shows agent_state="working" or has a
+// hook_bead assigned.
+//
+// Zombies cannot send POLECAT_DONE or other signals, so they sit undetected
+// by the reactive signal-based patrol. This function provides proactive detection.
+//
+// For each zombie found:
+//   - If git state is clean (no unpushed work): auto-nuke
+//   - If git state is dirty (unpushed/uncommitted work): escalate to Mayor via
+//     EscalateRecoveryNeeded, create cleanup wisp
+func DetectZombiePolecats(workDir, rigName string, router *mail.Router) *DetectZombiePolecatsResult {
+	result := &DetectZombiePolecatsResult{}
+
+	// Find town root for beads prefix resolution
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		townRoot = workDir
+	}
+
+	// List all polecat directories
+	polecatsDir := filepath.Join(townRoot, rigName, "polecats")
+	entries, err := os.ReadDir(polecatsDir)
+	if err != nil {
+		return result // No polecats directory
+	}
+
+	t := tmux.NewTmux()
+
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		polecatName := entry.Name()
+		sessionName := fmt.Sprintf("gt-%s-%s", rigName, polecatName)
+		result.Checked++
+
+		// Check if tmux session exists
+		sessionAlive, err := t.HasSession(sessionName)
+		if err != nil || sessionAlive {
+			continue // Session exists or error checking — not a zombie
+		}
+
+		// Session is dead. Check agent bead state.
+		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+
+		agentState, hookBead := getAgentBeadState(workDir, agentBeadID)
+
+		// A zombie has a dead session but agent_state suggests it should be alive,
+		// or it still has work hooked.
+		isZombie := false
+		if hookBead != "" {
+			isZombie = true
+		}
+		if agentState == "working" || agentState == "running" {
+			isZombie = true
+		}
+
+		if !isZombie {
+			continue
+		}
+
+		// Zombie detected! Determine cleanup action based on git state.
+		zombie := ZombieResult{
+			PolecatName: polecatName,
+			AgentState:  agentState,
+			HookBead:    hookBead,
+		}
+
+		cleanupStatus := getCleanupStatus(workDir, rigName, polecatName)
+
+		switch cleanupStatus {
+		case "clean", "":
+			// Clean or unknown — try auto-nuke
+			nukeResult := AutoNukeIfClean(workDir, rigName, polecatName)
+			if nukeResult.Nuked {
+				zombie.Action = "auto-nuked"
+			} else if nukeResult.Skipped {
+				// Couldn't nuke cleanly — create cleanup wisp
+				wispID, wispErr := createCleanupWisp(workDir, polecatName, hookBead, "")
+				if wispErr != nil {
+					zombie.Error = wispErr
+				}
+				zombie.Action = fmt.Sprintf("cleanup-wisp-created:%s (skip reason: %s)", wispID, nukeResult.Reason)
+			} else if nukeResult.Error != nil {
+				zombie.Error = nukeResult.Error
+				zombie.Action = "nuke-failed"
+			}
+
+		case "has_uncommitted", "has_stash", "has_unpushed":
+			// Dirty state — escalate to Mayor for recovery
+			if router != nil {
+				_, escErr := EscalateRecoveryNeeded(router, rigName, &RecoveryPayload{
+					PolecatName:   polecatName,
+					Rig:           rigName,
+					CleanupStatus: cleanupStatus,
+					IssueID:       hookBead,
+					DetectedAt:    time.Now(),
+				})
+				if escErr != nil {
+					zombie.Error = escErr
+				}
+			}
+			// Also create cleanup wisp for tracking
+			wispID, wispErr := createCleanupWisp(workDir, polecatName, hookBead, "")
+			if wispErr != nil && zombie.Error == nil {
+				zombie.Error = wispErr
+			}
+			zombie.Action = fmt.Sprintf("escalated (cleanup_status=%s, wisp=%s)", cleanupStatus, wispID)
+		}
+
+		result.Zombies = append(result.Zombies, zombie)
+	}
+
+	return result
+}
+
+// getAgentBeadState reads agent_state and hook_bead from an agent bead.
+// Returns the agent_state string and hook_bead ID.
+func getAgentBeadState(workDir, agentBeadID string) (agentState, hookBead string) {
+	output, err := util.ExecWithOutput(workDir, "bd", "show", agentBeadID, "--json")
+	if err != nil || output == "" {
+		return "", ""
+	}
+
+	// Parse JSON response — bd show --json returns an array
+	var issues []struct {
+		AgentState string `json:"agent_state"`
+		HookBead   string `json:"hook_bead"`
+	}
+	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
+		return "", ""
+	}
+
+	return issues[0].AgentState, issues[0].HookBead
+}
