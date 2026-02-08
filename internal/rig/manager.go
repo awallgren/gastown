@@ -356,6 +356,16 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	fmt.Printf("   ✓ Created shared bare repo\n")
 	bareGit := git.NewGitWithDir(bareRepoPath, "")
 
+	// When using HTTPS URLs, beads auto-routing heuristic misclassifies the
+	// user as "contributor" (assumes SSH = maintainer, HTTPS = read-only).
+	// Set beads.role=maintainer on the bare repo so all worktrees (refinery,
+	// polecats) inherit it and the URL heuristic is bypassed.
+	if strings.HasPrefix(opts.GitURL, "https://") || strings.HasPrefix(opts.GitURL, "http://") {
+		if err := bareGit.ConfigSet("beads.role", "maintainer"); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: Could not set beads.role on bare repo: %v\n", err)
+		}
+	}
+
 	// Determine default branch: use provided value or auto-detect from remote
 	var defaultBranch string
 	if opts.DefaultBranch != "" {
@@ -401,6 +411,16 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("checking out default branch for mayor: %w", err)
 	}
 	fmt.Printf("   ✓ Created mayor clone\n")
+
+	// When using HTTPS URLs, beads auto-routing heuristic misclassifies the
+	// user as "contributor" (assumes SSH = maintainer, HTTPS = read-only).
+	// This causes beads to route to ~/.beads-planning instead of local .beads/.
+	// Set beads.role=maintainer explicitly so the URL heuristic is bypassed.
+	if strings.HasPrefix(opts.GitURL, "https://") || strings.HasPrefix(opts.GitURL, "http://") {
+		if err := mayorGit.ConfigSet("beads.role", "maintainer"); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: Could not set beads.role for mayor: %v\n", err)
+		}
+	}
 
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
