@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tui/activity"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -26,15 +28,35 @@ var (
 )
 
 var activityCmd = &cobra.Command{
-	Use:     "activity",
+	Use:     "top",
+	Aliases: []string{"blink", "activity"},
 	GroupID: GroupDiag,
-	Short:   "Emit and view activity events",
-	Long: `Emit and view activity events for the Gas Town activity feed.
+	Short:   "Real-time agent monitor (like Unix top)",
+	Long: `Real-time process monitor for all Gas Town agents.
 
-Events are written to ~/gt/.events.jsonl and can be viewed with 'gt feed'.
+Shows live status including:
+  • Current tool/command execution
+  • Context remaining before auto-compact
+  • Activity levels (LED indicators)
+  • Rate limits and billing caps
+  • Agents blocked waiting for human
+
+LED Indicators:
+  ████  green = active (producing output)
+  ████  blue = recent activity
+  ▒▒▒▒  orange = rate-limited or hit cap
+  ▒▒▒▒  yellow = idle/warming down
+  ░░░░  gray = cooling
+   ··   dark = stuck (5m+)
+  ‼‼‼‼  red = needs human (blocked)
 
 Subcommands:
-  emit    Emit an activity event`,
+  emit    Emit an activity event
+
+Examples:
+  gt top         # Launch the monitor
+  gt blink       # Legacy alias`,
+	RunE: runActivityWatch,
 }
 
 var activityEmitCmd = &cobra.Command{
@@ -192,6 +214,16 @@ func runActivityEmit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Actor:   %s\n", actor)
 	fmt.Printf("  Payload: %s\n", string(payloadJSON))
 
+	return nil
+}
+
+// runActivityWatch launches the blinkenlights TUI.
+func runActivityWatch(cmd *cobra.Command, args []string) error {
+	m := activity.NewModel()
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("running activity TUI: %w", err)
+	}
 	return nil
 }
 

@@ -61,6 +61,7 @@ var beadsExemptCommands = map[string]bool{
 	"install":    true,
 	"tap":        true,
 	"dnd":        true,
+	"activity":      true, // Blinkenlights TUI reads tmux directly
 	"krc":           true, // KRC doesn't require beads
 	"run-migration": true, // Migration orchestrator handles its own beads checks
 }
