@@ -387,7 +387,7 @@ func parseMailInboxText(output string) []MailMessage {
 			rest := strings.TrimSpace(trimmed[2:])
 			if strings.HasPrefix(rest, "●") {
 				current.Read = false
-				current.Subject = strings.TrimSpace(rest[len("●"):])
+				current.Subject = strings.TrimSpace(strings.TrimPrefix(rest, "●"))
 			} else {
 				current.Read = true
 				current.Subject = rest
@@ -753,14 +753,23 @@ func (h *APIHandler) handleIssueShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run bd show to get issue details
-	output, err := h.runBdCommand(r.Context(), 10*time.Second, []string{"show", issueID})
+	// Try structured JSON output first (preferred — no text parsing needed)
+	output, err := h.runBdCommand(r.Context(), 10*time.Second, []string{"show", issueID, "--json"})
+	if err == nil {
+		if resp, ok := parseIssueShowJSON(output, issueID); ok {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+	}
+
+	// Fall back to text parsing
+	output, err = h.runBdCommand(r.Context(), 10*time.Second, []string{"show", issueID})
 	if err != nil {
 		h.sendError(w, "Failed to fetch issue: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Parse the output
 	resp := parseIssueShowOutput(output, issueID)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -889,7 +898,48 @@ func (h *APIHandler) runBdCommand(ctx context.Context, timeout time.Duration, ar
 	return output, nil
 }
 
-// parseIssueShowOutput parses the output from "bd show <id>".
+// parseIssueShowJSON parses the JSON output from "bd show <id> --json".
+// Returns (response, true) on success, or (zero, false) if parsing fails.
+func parseIssueShowJSON(output string, issueID string) (IssueShowResponse, bool) {
+	var items []struct {
+		ID          string   `json:"id"`
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Status      string   `json:"status"`
+		Priority    int      `json:"priority"`
+		Type        string   `json:"issue_type"`
+		CreatedAt   string   `json:"created_at"`
+		UpdatedAt   string   `json:"updated_at"`
+		DependsOn   []string `json:"depends_on,omitempty"`
+		Blocks      []string `json:"blocks,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(output), &items); err != nil || len(items) == 0 {
+		return IssueShowResponse{}, false
+	}
+	item := items[0]
+
+	priority := ""
+	if item.Priority > 0 {
+		priority = fmt.Sprintf("P%d", item.Priority)
+	}
+
+	return IssueShowResponse{
+		ID:          item.ID,
+		Title:       item.Title,
+		Type:        item.Type,
+		Status:      item.Status,
+		Priority:    priority,
+		Description: item.Description,
+		Created:     item.CreatedAt,
+		Updated:     item.UpdatedAt,
+		DependsOn:   item.DependsOn,
+		Blocks:      item.Blocks,
+		RawOutput:   output,
+	}, true
+}
+
+// parseIssueShowOutput parses the text output from "bd show <id>".
+// This is the fallback path when --json is unavailable.
 func parseIssueShowOutput(output string, issueID string) IssueShowResponse {
 	resp := IssueShowResponse{
 		ID:        issueID,
@@ -926,14 +976,13 @@ func parseIssueShowOutput(output string, issueID string) IssueShowResponse {
 
 				// Now parse the title from before the bracket
 				// Format: "○ id · title"
-				// Find the second · which separates id from title
-				if firstDot := strings.Index(beforeBracket, "·"); firstDot > 0 {
-					afterFirstDot := beforeBracket[firstDot+len("·"):]
-					if secondDot := strings.Index(afterFirstDot, "·"); secondDot > 0 {
-						resp.Title = strings.TrimSpace(afterFirstDot[secondDot+len("·"):])
+				// Use strings.Cut for safe splitting on multi-byte "·" separator
+				if _, afterFirst, ok := strings.Cut(beforeBracket, "·"); ok {
+					if _, afterSecond, ok := strings.Cut(afterFirst, "·"); ok {
+						resp.Title = strings.TrimSpace(afterSecond)
 					} else {
 						// Only one dot - id is embedded in icon part
-						resp.Title = strings.TrimSpace(afterFirstDot)
+						resp.Title = strings.TrimSpace(afterFirst)
 					}
 				}
 			}
@@ -943,9 +992,10 @@ func parseIssueShowOutput(output string, issueID string) IssueShowResponse {
 		if strings.HasPrefix(line, "Type:") {
 			resp.Type = strings.TrimSpace(strings.TrimPrefix(line, "Type:"))
 		} else if strings.HasPrefix(line, "Created:") {
+			// Split always returns >= 1 element; parts[0] is safe unconditionally
 			parts := strings.Split(line, "·")
 			resp.Created = strings.TrimSpace(strings.TrimPrefix(parts[0], "Created:"))
-			if len(parts) > 1 {
+			if len(parts) >= 2 {
 				resp.Updated = strings.TrimSpace(strings.TrimPrefix(parts[1], "Updated:"))
 			}
 		} else if line == "DESCRIPTION" {
