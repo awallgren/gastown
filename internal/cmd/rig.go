@@ -1319,9 +1319,20 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 				sessionIcon = style.Success.Render("●")
 			}
 
-			stateStr := string(p.State)
+			// Reconcile display state with tmux session liveness.
+			// Per gt-zecmc design: tmux is ground truth for observable states.
+			// If session is running but beads says done, the polecat is still alive.
+			// If session is dead but beads says working, the polecat is actually done.
+			displayState := p.State
+			if hasSession && displayState == polecat.StateDone {
+				displayState = polecat.StateWorking
+			} else if !hasSession && displayState.IsActive() {
+				displayState = polecat.StateDone
+			}
+
+			stateStr := string(displayState)
 			if p.Issue != "" {
-				stateStr = fmt.Sprintf("%s → %s", p.State, p.Issue)
+				stateStr = fmt.Sprintf("%s → %s", displayState, p.Issue)
 			}
 
 			fmt.Printf("  %s %s: %s\n", sessionIcon, p.Name, stateStr)
