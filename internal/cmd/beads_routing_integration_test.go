@@ -25,6 +25,15 @@ func setupRoutingTestTown(t *testing.T) string {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 
+	// Create mayor/town.json so FindTownRoot() can detect this as a Gas Town root
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
 	// Create town-level .beads directory
 	townBeadsDir := filepath.Join(townRoot, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
@@ -181,24 +190,17 @@ func TestBeadsRoutingFromTownRoot(t *testing.T) {
 	testrigIssue := createTestIssue(t, testrigRigPath, "Testrig routing test")
 
 	tests := []struct {
-		id       string
-		title    string
-		crossRig bool // true if this requires cross-rig routing (currently broken with dolt)
+		id    string
+		title string
 	}{
-		{townIssue.ID, townIssue.Title, false},
-		{gastownIssue.ID, gastownIssue.Title, true},
-		{testrigIssue.ID, testrigIssue.Title, true},
+		{townIssue.ID, townIssue.Title},
+		{gastownIssue.ID, gastownIssue.Title},
+		{testrigIssue.ID, testrigIssue.Title},
 	}
 
 	townBeads := beads.New(townRoot)
 	for _, tc := range tests {
 		t.Run(tc.id, func(t *testing.T) {
-			if tc.crossRig {
-				// Skip: Beads.Show() does not yet route to sub-repo dolt databases
-				// via routes.jsonl. Fix in Beads.Show() by using ResolveRoutingTarget.
-				// Tracked: https://github.com/steveyegge/gastown/issues/1305
-				t.Skip("Beads.Show() cross-rig routing not yet implemented for dolt backend (#1305)")
-			}
 			issue, err := townBeads.Show(tc.id)
 			if err != nil {
 				t.Fatalf("bd show %s failed: %v", tc.id, err)

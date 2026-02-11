@@ -661,35 +661,65 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Detect prefix from issues.jsonl (prefix is stored in DB, not config.yaml)
-		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-		if f, readErr := os.Open(jsonlPath); readErr == nil {
-			scanner := bufio.NewScanner(f)
-			if scanner.Scan() {
-				var issue struct {
-					ID string `json:"id"`
-				}
-				if json.Unmarshal(scanner.Bytes(), &issue) == nil && issue.ID != "" {
-					// Extract prefix: everything before the last "-" segment
-					if lastDash := strings.LastIndex(issue.ID, "-"); lastDash > 0 {
-						detected := issue.ID[:lastDash]
-						if detected != "" && rigAddPrefix != "" {
-							if strings.TrimSuffix(rigAddPrefix, "-") != detected {
-								f.Close()
-								return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
-							}
+		// Detect prefix: try dolt backend first, fall back to issues.jsonl.
+		// With dolt, metadata.json and the database survive clone, so we can
+		// query the prefix directly via "bd config get issue_prefix".
+		prefixDetected := false
+		metadataPath := filepath.Join(beadsDir, "metadata.json")
+		if metaBytes, readErr := os.ReadFile(metadataPath); readErr == nil {
+			var meta struct {
+				Backend string `json:"backend"`
+			}
+			if json.Unmarshal(metaBytes, &meta) == nil && meta.Backend == "dolt" {
+				workDir := filepath.Dir(beadsDir)
+				bdCmd := exec.Command("bd", "config", "get", "issue_prefix")
+				bdCmd.Dir = workDir
+				if out, bdErr := bdCmd.Output(); bdErr == nil {
+					detected := strings.TrimSpace(string(out))
+					if detected != "" {
+						if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
+							return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
 						}
-						if detected != "" && result.BeadsPrefix == "" {
+						if result.BeadsPrefix == "" {
 							result.BeadsPrefix = detected
 						}
+						prefixDetected = true
 					}
 				}
 			}
-			f.Close()
+		}
+
+		// Fall back to issues.jsonl for non-dolt backends or if dolt detection failed
+		if !prefixDetected {
+			jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+			if f, readErr := os.Open(jsonlPath); readErr == nil {
+				scanner := bufio.NewScanner(f)
+				if scanner.Scan() {
+					var issue struct {
+						ID string `json:"id"`
+					}
+					if json.Unmarshal(scanner.Bytes(), &issue) == nil && issue.ID != "" {
+						// Extract prefix: everything before the last "-" segment
+						if lastDash := strings.LastIndex(issue.ID, "-"); lastDash > 0 {
+							detected := issue.ID[:lastDash]
+							if detected != "" && rigAddPrefix != "" {
+								if strings.TrimSuffix(rigAddPrefix, "-") != detected {
+									f.Close()
+									return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
+								}
+							}
+							if detected != "" && result.BeadsPrefix == "" {
+								result.BeadsPrefix = detected
+							}
+						}
+					}
+				}
+				f.Close()
+			}
 		}
 
 		// Init database if metadata.json is missing (DB files are gitignored)
-		metadataPath := filepath.Join(beadsDir, "metadata.json")
+		metadataPath = filepath.Join(beadsDir, "metadata.json")
 		if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 			prefix := result.BeadsPrefix
 			if prefix == "" {

@@ -241,12 +241,7 @@ func TestBeadsDbInitAfterClone(t *testing.T) {
 
 	t.Run("TrackedRepoWithPrefixMismatchErrors", func(t *testing.T) {
 		// Test that when --prefix is explicitly provided but doesn't match
-		// the prefix detected from config.yaml, gt rig add fails with an error.
-		// Skip: gt rig add --adopt doesn't detect prefix mismatch with dolt backend.
-		// With dolt, metadata.json and dolt/ survive clone, but adopt ignores the
-		// existing prefix in the database. Fix in rig.go adopt logic.
-		// Tracked: https://github.com/steveyegge/gastown/issues/1306
-		t.Skip("gt rig add --adopt prefix mismatch detection not yet implemented for dolt backend (#1306)")
+		// the prefix detected from the database, gt rig add fails with an error.
 
 		townRoot := filepath.Join(tmpDir, "town-mismatch")
 

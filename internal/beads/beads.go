@@ -423,6 +423,14 @@ func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
 
 // Show returns detailed information about an issue.
 func (b *Beads) Show(id string) (*Issue, error) {
+	// Route cross-rig queries via routes.jsonl so that rig-level bead IDs
+	// (e.g., "gt-abc123") resolve to the correct rig database.
+	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
+	if targetDir != b.getResolvedBeadsDir() {
+		target := NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+		return target.Show(id)
+	}
+
 	out, err := b.run("show", id, "--json")
 	if err != nil {
 		return nil, err
