@@ -26,6 +26,11 @@ var (
 	ErrRigExists   = errors.New("rig already exists")
 )
 
+// reservedRigNames are names that cannot be used for rigs because they
+// collide with town-level infrastructure. "hq" is special-cased by
+// EnsureMetadata and dolt routing as the town-level beads alias.
+var reservedRigNames = []string{"hq"}
+
 // wrapCloneError wraps clone errors with helpful suggestions.
 // Detects common auth failures and suggests SSH as an alternative.
 func wrapCloneError(err error, gitURL string) error {
@@ -273,6 +278,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("rig name %q contains invalid characters; hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead (underscores are allowed)", opts.Name, sanitized)
 	}
 
+	// Reject reserved names that collide with town-level infrastructure.
+	// "hq" is special-cased by EnsureMetadata and dolt routing as the town-level alias.
+	for _, reserved := range reservedRigNames {
+		if strings.EqualFold(opts.Name, reserved) {
+			return nil, fmt.Errorf("rig name %q is reserved for town-level infrastructure", opts.Name)
+		}
+	}
+
 	rigPath := filepath.Join(m.townRoot, opts.Name)
 
 	// Check if directory already exists
@@ -463,8 +476,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// bd init --server sets dolt_mode but not dolt_database. EnsureMetadata
 	// writes both fields so bd connects to the correct centralized database.
 	if err := doltserver.EnsureMetadata(m.townRoot, opts.Name); err != nil {
-		// Non-fatal: beads will fall back to embedded mode but rig is functional
+		// Non-fatal: daemon's EnsureAllMetadata self-heals on next startup,
+		// or user can run gt doctor --fix to repair manually.
 		fmt.Printf("  Warning: Could not set Dolt server metadata: %v\n", err)
+		fmt.Printf("  Run 'gt doctor --fix' to repair, or it will self-heal on next daemon start.\n")
 	}
 
 	// Provision PRIME.md with Gas Town context for all workers in this rig.
@@ -1058,6 +1073,12 @@ func (m *Manager) RegisterRig(opts RegisterRigOptions) (*RegisterRigResult, erro
 		sanitized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(opts.Name)
 		sanitized = strings.ToLower(sanitized)
 		return nil, fmt.Errorf("rig name %q contains invalid characters; hyphens, dots, and spaces are reserved for agent ID parsing. Try %q instead (underscores are allowed)", opts.Name, sanitized)
+	}
+
+	for _, reserved := range reservedRigNames {
+		if strings.EqualFold(opts.Name, reserved) {
+			return nil, fmt.Errorf("rig name %q is reserved for town-level infrastructure", opts.Name)
+		}
 	}
 
 	rigPath := filepath.Join(m.townRoot, opts.Name)
