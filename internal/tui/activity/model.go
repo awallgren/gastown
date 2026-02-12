@@ -589,7 +589,9 @@ func parsePaneContent(a *AgentLight, lines []string) {
 		lower := strings.ToLower(trimmed)
 
 		// Usage limit: "You've hit your limit · resets 2pm (America/Los_Angeles)"
-		if strings.Contains(lower, "you've hit your limit") {
+		// Match "hit your limit" without the contraction to handle curly apostrophe
+		// (Claude Code may render ' as U+2019 which breaks exact "you've" matching)
+		if strings.Contains(lower, "hit your limit") {
 			a.HitLimit = true
 			a.LimitResetInfo = extractLimitResetInfo(trimmed)
 			break
@@ -607,8 +609,8 @@ func parsePaneContent(a *AgentLight, lines []string) {
 		}
 
 		// Session limit warning: "You've used 95% of your session limit · resets 8pm (America/Los_Angeles)"
-		// This is a WARNING before hitting the actual limit - agent is still alive but approaching the wall.
-		if strings.Contains(lower, "of your session limit") {
+		// Match on "of your session limit" to avoid curly apostrophe issue with "you've"
+		if strings.Contains(lower, "of your session limit") || strings.Contains(lower, "% of your session") {
 			if pct, reset := extractSessionLimit(trimmed); pct > 0 {
 				a.SessionLimitPct = pct
 				if reset != "" {
@@ -683,6 +685,11 @@ func parsePaneContent(a *AgentLight, lines []string) {
 	if strings.HasPrefix(a.StatusText, "COMPACTING") {
 		a.CurrentTool = ""
 		a.ContextPercent = 0
+	}
+
+	// HitLimit overrides stale tool calls - agent is dead, last tool is noise
+	if a.HitLimit {
+		a.CurrentTool = ""
 	}
 
 	// Append task name to status (gives context about WHAT the agent is working on)
