@@ -52,6 +52,8 @@ type AgentLight struct {
 	LimitResetInfo  string // extracted reset info (e.g., "resets 2pm (America/Los_Angeles)")
 	ContextPercent  int    // context remaining (0-100, 0=unknown)
 	CurrentTool     string // currently executing tool/command (e.g., "Bash(git status)")
+	SessionLimitPct int    // session usage percent (0=unknown, sticky)
+	SessionLimitReset string // when the session limit resets (sticky)
 
 	// Hover tooltip info
 	CurrentBead   string // detected bead ID from pane content
@@ -564,6 +566,7 @@ func parsePaneContent(a *AgentLight, lines []string) {
 	a.LimitResetInfo = ""
 	a.CurrentTool = "" // Reset each poll - stale tools cause false display
 	// ContextPercent persists until updated (sticky)
+	// SessionLimitPct and SessionLimitReset persist until updated (sticky)
 
 	if len(lines) == 0 {
 		return
@@ -601,6 +604,17 @@ func parsePaneContent(a *AgentLight, lines []string) {
 		if strings.Contains(lower, "/extra-usage") {
 			a.HitLimit = true
 			break
+		}
+
+		// Session limit warning: "You've used 95% of your session limit · resets 8pm (America/Los_Angeles)"
+		// This is a WARNING before hitting the actual limit - agent is still alive but approaching the wall.
+		if strings.Contains(lower, "of your session limit") {
+			if pct, reset := extractSessionLimit(trimmed); pct > 0 {
+				a.SessionLimitPct = pct
+				if reset != "" {
+					a.SessionLimitReset = reset
+				}
+			}
 		}
 
 		// Context percentage: "Context left until auto-compact: 20%"
@@ -819,6 +833,31 @@ func extractContextPercent(line string) int {
 		return pct
 	}
 	return 0
+}
+
+// extractSessionLimit extracts usage percentage and reset time from a session limit warning.
+// Input:  "You've used 95% of your session limit · resets 8pm (America/Los_Angeles)"
+// Output: 95, "resets 8pm (America/Los_Angeles)"
+func extractSessionLimit(line string) (int, string) {
+	lower := strings.ToLower(line)
+	idx := strings.Index(lower, "you've used ")
+	if idx < 0 {
+		return 0, ""
+	}
+	rest := line[idx+len("you've used "):]
+	// Extract percentage: "95% of your session limit"
+	pctIdx := strings.Index(rest, "%")
+	if pctIdx < 0 {
+		return 0, ""
+	}
+	numStr := strings.TrimSpace(rest[:pctIdx])
+	var pct int
+	if _, err := fmt.Sscanf(numStr, "%d", &pct); err != nil || pct < 0 || pct > 100 {
+		return 0, ""
+	}
+	// Extract reset info
+	reset := extractLimitResetInfo(line)
+	return pct, reset
 }
 
 // extractCurrentTool extracts the currently executing tool/command from Claude's output.

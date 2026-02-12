@@ -374,6 +374,12 @@ func (m *Model) renderLight(a *AgentLight) string {
 		}
 	}
 
+	// Append session limit warning if known (more urgent than context)
+	if a.SessionLimitPct > 0 {
+		limitStr := renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
+		statusStr += " " + limitStr
+	}
+
 	// Append context indicator if known and low
 	if a.ContextPercent > 0 {
 		ctxBar := renderContextIndicator(a.ContextPercent)
@@ -599,6 +605,21 @@ func (m *Model) renderHoverDetail() string {
 		parts = append(parts, "⏺ "+a.CurrentTool)
 	}
 
+	// Show session limit warning if known
+	if a.SessionLimitPct > 0 {
+		limitInfo := fmt.Sprintf("session: %d%% used", a.SessionLimitPct)
+		if a.SessionLimitReset != "" {
+			limitInfo += " · " + a.SessionLimitReset
+		}
+		var limitStyle lipgloss.Style
+		if a.SessionLimitPct >= 90 {
+			limitStyle = lipgloss.NewStyle().Foreground(colorWaiting)
+		} else {
+			limitStyle = lipgloss.NewStyle().Foreground(colorRateLimited)
+		}
+		parts = append(parts, limitStyle.Render(limitInfo))
+	}
+
 	// Show context remaining if known
 	if a.ContextPercent > 0 {
 		ctxInfo := fmt.Sprintf("context: %d%%", a.ContextPercent)
@@ -652,6 +673,30 @@ func renderContextIndicator(percent int) string {
 		style = lipgloss.NewStyle().Foreground(colorWarm) // yellow
 	default:
 		style = statusDimStyle
+	}
+
+	return style.Render(text)
+}
+
+// renderSessionLimitIndicator returns a compact text indicator for session usage limit.
+func renderSessionLimitIndicator(pct int, resetInfo string) string {
+	if pct <= 0 {
+		return ""
+	}
+
+	text := fmt.Sprintf("%d%% session used", pct)
+	if resetInfo != "" {
+		text += " · " + resetInfo
+	}
+
+	var style lipgloss.Style
+	switch {
+	case pct >= 95:
+		style = lipgloss.NewStyle().Foreground(colorWaiting) // red - about to die
+	case pct >= 80:
+		style = lipgloss.NewStyle().Foreground(colorRateLimited) // orange
+	default:
+		style = lipgloss.NewStyle().Foreground(colorWarm) // yellow
 	}
 
 	return style.Render(text)
