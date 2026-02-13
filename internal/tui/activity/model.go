@@ -990,28 +990,16 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	var activeSubTool string  // "└ ToolName" from active panel or bare (= running)
 	var activeTaskDesc string // task description from active panel
 
-	// Track whether we're inside a ┃-framed panel and whether that panel
-	// is active (braille spinner header) or completed (# header).
-	inPanel := false
-	panelIsActive := false    // true when current ┃ panel has a spinner header
+	// panelIsActive tracks whether the most recent panel header was a braille
+	// spinner (active) or # prefix (completed). Applies to subsequent $ and └
+	// lines inside ┃ frames.
+	panelIsActive := false
 	var activeToolName string // from braille spinner: "⠃ Explore Task" → "Explore Task"
 	activeSpinnerCount := 0   // how many braille spinners seen (parallel tools)
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
-
-		// Track ┃-framed panel boundaries
-		if strings.HasPrefix(trimmed, "┃") {
-			if !inPanel {
-				// Entering a new panel — reset active flag
-				inPanel = true
-				panelIsActive = false
-			}
-		} else if trimmed != "" && !isOpenCodeChromeLine(trimmed) {
-			inPanel = false
-			panelIsActive = false
-		}
 
 		// Skip empty lines and pure box-drawing chrome
 		if trimmed == "" || isOpenCodeChromeLine(trimmed) {
@@ -1031,32 +1019,29 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 
 		// ── Content inside ┃-framed panel ──
-		// Panels can be completed (# header) or active (braille spinner header).
-		// We detect which kind by checking the first description line.
-		// Note: sidebar content (todo items, context %) may appear on the same
-		// line as panel content, so we check for those before the continue.
+		// Panel headers set panelIsActive: spinner=true, #=false.
+		// Subsequent $ and └ lines inherit this state.
 		if strings.HasPrefix(trimmed, "┃") {
 			inner := strings.TrimSpace(strings.TrimPrefix(trimmed, "┃"))
 
-			// Check for braille spinner inside panel: "⠙ Sling SEC webhook auth bypass"
+			// Panel headers — these set active/completed state
 			if spinner := extractBrailleSpinner(inner); spinner != "" {
 				panelIsActive = true
 				spinnerStatus = spinner
 				activeToolName = spinner
 				activeSpinnerCount++
 			} else if strings.HasPrefix(inner, "# ") {
-				// "# Explore Task" or "# Zombie scan" — completed tool
-				desc := strings.TrimPrefix(inner, "# ")
-				lastPanelDesc = desc
-				panelIsActive = false // explicit: # means completed
+				lastPanelDesc = strings.TrimPrefix(inner, "# ")
+				panelIsActive = false
 			} else if strings.HasPrefix(inner, "$ ") {
+				// Command line — active if current panel has spinner header
 				cmd := strings.TrimPrefix(inner, "$ ")
 				if panelIsActive {
 					activeBashCmd = cmd
 				} else {
 					lastBashCmd = cmd
 				}
-			} else if strings.HasPrefix(inner, "└ ") || strings.HasPrefix(inner, "└") {
+			} else if strings.HasPrefix(inner, "└") {
 				sub := strings.TrimSpace(strings.TrimPrefix(inner, "└"))
 				if sub != "" {
 					if panelIsActive {
@@ -1065,19 +1050,22 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 						lastSubTool = sub
 					}
 				}
-			} else if inner != "" && !strings.HasPrefix(inner, "ctrl+") &&
-				!strings.HasPrefix(inner, "✓") && !strings.HasPrefix(inner, "○") {
-				if strings.Contains(inner, "toolcall") {
-					if panelIsActive {
-						activeTaskDesc = inner
-					} else {
-						lastPanelDesc = inner
-					}
+			} else if strings.Contains(inner, "toolcall") {
+				if panelIsActive {
+					activeTaskDesc = inner
+				} else {
+					lastPanelDesc = inner
 				}
 			}
 
+			// OpenCode permission dialog: "△ Permission required"
+			if strings.Contains(inner, "Permission required") ||
+				strings.Contains(inner, "Allow once") {
+				a.WaitingForHuman = true
+				a.WaitingReason = "permission"
+			}
+
 			// Sidebar content can appear on ┃ lines (right-aligned).
-			// Check the full trimmed line for these patterns.
 			if strings.Contains(trimmed, "[•]") {
 				hasTodoInProgress = true
 			}
@@ -1088,27 +1076,29 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			continue // Don't process ┃ lines through other matchers
 		}
 
-		// ── Braille spinner (bare, no ┃ frame): "⠃ Explore Task" ──
+		// ── Non-┃ lines: bare content (active work or prose) ──
+
+		// Braille spinner (bare): "⠃ Explore Task"
 		if status := extractBrailleSpinner(trimmed); status != "" {
 			spinnerStatus = status
 			activeToolName = status
 			activeSpinnerCount++
 		}
 
-		// ── Bare "└ ToolName args" — active sub-tool (no ┃ frame) ──
-		if strings.HasPrefix(trimmed, "└ ") || strings.HasPrefix(trimmed, "└") {
+		// Bare "$ command" — actively executing (no ┃ border = output pending)
+		if strings.HasPrefix(trimmed, "$ ") {
+			activeBashCmd = strings.TrimPrefix(trimmed, "$ ")
+		}
+
+		// Bare "└ ToolName" — active sub-tool
+		if strings.HasPrefix(trimmed, "└") {
 			sub := strings.TrimSpace(strings.TrimPrefix(trimmed, "└"))
 			if sub != "" {
 				activeSubTool = sub
 			}
 		}
 
-		// ── Bare "$ command" — active command execution ──
-		if strings.HasPrefix(trimmed, "$ ") {
-			activeBashCmd = strings.TrimPrefix(trimmed, "$ ")
-		}
-
-		// ── Task description (active, no ┃ frame) ──
+		// Task description with toolcall count
 		if strings.Contains(trimmed, "toolcall") {
 			activeTaskDesc = trimmed
 		}
