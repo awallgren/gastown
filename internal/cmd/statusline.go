@@ -671,22 +671,27 @@ func isSessionWorkingClaude(lines []string) bool {
 	return false
 }
 
-// isSessionWorkingOpenCode detects working state for OpenCode via the ▣ indicator
-// or the ✱ tool execution marker.
+// isSessionWorkingOpenCode detects working state for OpenCode.
+// The ▣ line is ALWAYS present (static chrome) and is NOT a working signal.
+// Real working signals are: ✱ (tool in flight), braille spinners, ~ (pending ops).
 func isSessionWorkingOpenCode(lines []string) bool {
+	brailleSpinners := "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷"
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		// ▣ = OpenCode is actively processing (equivalent of Claude's ✻)
-		if strings.HasPrefix(trimmed, "▣") {
-			return true
-		}
 		// ✱ = tool execution in progress
 		if strings.HasPrefix(trimmed, "✱") {
 			return true
 		}
-		// ~ = preparing an operation
+		// ~ = preparing an operation (e.g., "~ Preparing write...")
 		if strings.HasPrefix(trimmed, "~") && len(trimmed) > 2 {
 			return true
+		}
+		// Braille spinner = active processing (e.g., "⠏ Analyzing...")
+		if len(trimmed) > 0 {
+			firstRune := []rune(trimmed)[0]
+			if strings.ContainsRune(brailleSpinners, firstRune) {
+				return true
+			}
 		}
 	}
 	return false

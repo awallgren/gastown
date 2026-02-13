@@ -912,15 +912,16 @@ func parsePaneContentClaude(a *AgentLight, lines []string) {
 // parsePaneContentOpenCode is the pane parser for OpenCode sessions.
 // OpenCode's TUI has distinctive patterns visible in tmux capture-pane:
 //
-//	▣  Build · claude-opus-4.6 · 2m 17s    — working indicator with model + elapsed
-//	✱ Grep "pattern" in pkg/...             — tool execution
-//	→ Read file.go [offset=1, limit=20]     — tool result
-//	~ Preparing write...                    — pending operation
-//	⠏ Sling Ruby analyzer...               — braille spinner with action
-//	■■■■■■⬝⬝  esc interrupt                — bottom status bar (progress dots)
+//	▣  Build · claude-opus-4.6 · 2m 17s    — ALWAYS present (static chrome, NOT a working signal)
+//	✱ Grep "pattern" in pkg/...             — tool execution in flight (WORKING signal)
+//	→ Read file.go [offset=1, limit=20]     — tool result (completed, not in-flight)
+//	~ Preparing write...                    — pending operation (WORKING signal)
+//	⠏ Sling Ruby analyzer...               — braille spinner with action (WORKING signal)
+//	■■■■■■⬝⬝  esc interrupt                — bottom status bar (filled ■ = progress)
 //	Build  Claude Opus 4.6 GitHub Copilot   — model info line (chrome)
 //	┃ ... ╹▀▀▀                              — box-drawing chrome
 //	40,140  31% ($0.00)                     — context/token info in header
+//	[•] Fix the parser                      — todo item in-progress (sidebar, wide panes only)
 func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	a.StatusText = ""
 	a.WaitingForHuman = false
@@ -935,7 +936,13 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		return
 	}
 
-	// Scan all lines for status signals.
+	// Collect signals from all lines.
+	var elapsedTime string   // from ▣ line (e.g., "2m 17s")
+	var lastToolLine string  // last ✱ tool invocation seen
+	var pendingOp string     // from ~ lines
+	var spinnerStatus string // from braille spinner lines
+	var hasTodoInProgress bool
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
@@ -945,19 +952,18 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			continue
 		}
 
-		// ── Working indicator: "▣  Build · claude-opus-4.6 · 2m 17s" ──
-		// The ▣ (filled square) at the start of a line indicates active processing.
+		// ── ▣ line: ALWAYS present. Only extract elapsed time suffix. ──
+		// "▣  Build · claude-opus-4.6 · 2m 17s" → extract "2m 17s"
+		// "▣  Build · claude-opus-4.6" → no elapsed time (just started or idle)
 		if strings.HasPrefix(trimmed, "▣") {
-			if status := extractOpenCodeWorkingStatus(trimmed); status != "" {
-				a.StatusText = status
-			}
+			elapsedTime = extractOpenCodeElapsedTime(trimmed)
 		}
 
-		// ── Tool execution: "✱ Grep ..." or "→ Read ..." ──
-		// ✱ = tool invocation, → = tool result
+		// ── Tool execution: "✱ Grep ..." ──
+		// ✱ = tool invocation in flight (REAL working signal)
 		if strings.HasPrefix(trimmed, "✱") {
 			if tool := extractOpenCodeTool(trimmed); tool != "" {
-				a.CurrentTool = tool
+				lastToolLine = tool
 			}
 		}
 
@@ -965,15 +971,23 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		if strings.HasPrefix(trimmed, "~") {
 			rest := strings.TrimSpace(trimmed[1:])
 			if rest != "" {
-				a.StatusText = rest
+				pendingOp = rest
 			}
 		}
 
-		// ── Braille spinner: already handled by extractStatusLine (shared) ──
-		// e.g., "⠏ Sling Ruby analyzer..." — the shared function catches these
+		// ── Braille spinner: "⠏ Analyzing..." ──
+		if spinnerStatus == "" {
+			if status := extractBrailleSpinner(trimmed); status != "" {
+				spinnerStatus = status
+			}
+		}
+
+		// ── Todo items in sidebar: "[•] task name" = in-progress ──
+		if strings.Contains(trimmed, "[•]") {
+			hasTodoInProgress = true
+		}
 
 		// ── Context/token info in header line: "40,140  31% ($0.00)" ──
-		// Pattern: "<tokens>  <pct>% (<cost>)" appearing after the # header
 		if pct := extractOpenCodeContextPercent(trimmed); pct > 0 {
 			a.ContextPercent = pct
 		}
@@ -989,19 +1003,31 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 	}
 
-	// If no tool found from ✱ lines, try braille spinner lines (shared code)
-	if a.CurrentTool == "" && a.StatusText == "" {
-		for i := len(lines) - 1; i >= 0; i-- {
-			trimmed := strings.TrimSpace(lines[i])
-			if trimmed == "" || isOpenCodeChromeLine(trimmed) {
-				continue
-			}
-			if status := extractStatusLine(trimmed); status != "" {
-				a.StatusText = status
-				break
-			}
+	// Priority order for status:
+	// 1. Tool in flight (✱) — most informative
+	// 2. Pending operation (~) — about to do something
+	// 3. Braille spinner — active processing
+	// 4. Elapsed time from ▣ line — shows duration but not what's happening
+	// 5. Todo in-progress — sidebar signal (wide panes only)
+	// 6. Nothing — agent is idle
+
+	if lastToolLine != "" {
+		a.CurrentTool = lastToolLine
+		if elapsedTime != "" {
+			a.StatusText = elapsedTime
 		}
+	} else if pendingOp != "" {
+		a.StatusText = pendingOp
+	} else if spinnerStatus != "" {
+		a.StatusText = spinnerStatus
+	} else if elapsedTime != "" {
+		// Elapsed time alone (no tool/spinner) — agent is thinking or between steps
+		a.StatusText = elapsedTime
+	} else if hasTodoInProgress {
+		// No active signals but has in-progress todo — likely between operations
+		a.StatusText = ""
 	}
+	// else: no signals at all → agent is idle, StatusText stays ""
 
 	// HitLimit overrides stale tool display
 	if a.HitLimit {
@@ -1055,23 +1081,87 @@ func isBoxDrawingOnly(s string) bool {
 	return true
 }
 
-// extractOpenCodeWorkingStatus extracts status from OpenCode's working indicator line.
+// extractOpenCodeElapsedTime extracts the elapsed time suffix from an OpenCode ▣ line.
+// The ▣ line is ALWAYS present (static chrome) but the elapsed time is useful.
+// It also extracts the task name (e.g., "Build", "Compaction") as context.
 // Input:  "▣  Build · claude-opus-4.6 · 2m 17s"
-// Output: "Build · claude-opus-4.6 · 2m 17s"
+// Output: "Build · 2m 17s"
+// Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s"
+// Output: "Compaction · 1m 6s"
 // Input:  "▣  Build · claude-opus-4.6"
-// Output: "Build · claude-opus-4.6"
-func extractOpenCodeWorkingStatus(line string) string {
+// Output: "" (no elapsed time = no useful status)
+func extractOpenCodeElapsedTime(line string) string {
 	trimmed := strings.TrimSpace(line)
-	// Skip past the ▣ indicator
 	idx := strings.Index(trimmed, "▣")
 	if idx < 0 {
 		return ""
 	}
 	rest := strings.TrimSpace(trimmed[idx+len("▣"):])
 	if rest == "" {
+		return ""
+	}
+
+	// Split on " · " to get segments: [taskName, model, elapsed?]
+	segments := strings.Split(rest, " · ")
+	if len(segments) < 3 {
+		return "" // No elapsed time segment
+	}
+
+	// Last segment should look like a duration: "2m 17s", "45s", "1h 3m"
+	lastSeg := strings.TrimSpace(segments[len(segments)-1])
+	if !looksLikeDuration(lastSeg) {
+		return ""
+	}
+
+	// Return "TaskName · elapsed" (skip the model name, it's noise)
+	taskName := strings.TrimSpace(segments[0])
+	if taskName != "" {
+		return taskName + " · " + lastSeg
+	}
+	return lastSeg
+}
+
+// looksLikeDuration returns true if the string resembles a time duration
+// like "2m 17s", "45s", "1h 3m 12s", etc.
+func looksLikeDuration(s string) bool {
+	if len(s) == 0 || len(s) > 20 {
+		return false
+	}
+	hasTimeUnit := false
+	for _, r := range s {
+		if r == 's' || r == 'm' || r == 'h' {
+			hasTimeUnit = true
+		} else if r >= '0' && r <= '9' {
+			// digits are fine
+		} else if r == ' ' {
+			// spaces between parts are fine
+		} else {
+			return false // unexpected character
+		}
+	}
+	return hasTimeUnit
+}
+
+// extractBrailleSpinner extracts status text from a line with a braille spinner character.
+// Input:  "⠏ Analyzing code..."
+// Output: "Analyzing code..."
+// Returns "" if the line doesn't start with a braille spinner.
+func extractBrailleSpinner(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	// Check first rune for braille spinner characters
+	runes := []rune(trimmed)
+	spinners := "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷"
+	if strings.ContainsRune(spinners, runes[0]) {
+		rest := strings.TrimSpace(string(runes[1:]))
+		if rest != "" {
+			return truncateStatus(rest)
+		}
 		return "working"
 	}
-	return truncateStatus(rest)
+	return ""
 }
 
 // extractOpenCodeTool extracts a tool invocation from OpenCode's tool lines.
