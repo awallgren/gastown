@@ -225,7 +225,7 @@ func (m *Model) renderRig(rig string) string {
 	var infra, workers []*AgentLight
 	for _, a := range agents {
 		switch a.Role {
-		case "mayor", "deacon", "witness", "refinery":
+		case "mayor", "deacon", "dog", "witness", "refinery":
 			infra = append(infra, a)
 		default:
 			workers = append(workers, a)

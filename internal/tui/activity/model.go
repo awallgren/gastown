@@ -371,6 +371,16 @@ func parseSessionName(a *AgentLight) {
 	}
 
 	suffix := strings.TrimPrefix(name, "gt-")
+
+	// Dog sessions: gt-dog-{name} (config pattern) - town-level, no rig
+	if strings.HasPrefix(suffix, "dog-") {
+		a.Rig = "hq" // town-level agents shown alongside mayor/deacon
+		a.Role = constants.RoleDog
+		a.Name = strings.TrimPrefix(suffix, "dog-")
+		a.Icon = constants.EmojiDog
+		return
+	}
+
 	parts := strings.SplitN(suffix, "-", 2)
 	if len(parts) < 2 {
 		a.Name = suffix
@@ -393,6 +403,11 @@ func parseSessionName(a *AgentLight) {
 		a.Role = constants.RoleCrew
 		a.Name = strings.TrimPrefix(rest, "crew-")
 		a.Icon = constants.EmojiCrew
+	// Dog sessions: gt-{town}-deacon-{name} (session_manager pattern)
+	case strings.HasPrefix(rest, "deacon-"):
+		a.Role = constants.RoleDog
+		a.Name = strings.TrimPrefix(rest, "deacon-")
+		a.Icon = constants.EmojiDog
 	default:
 		a.Role = constants.RolePolecat
 		a.Name = rest
@@ -428,10 +443,11 @@ func (m *Model) agentsForRig(rig string) []*AgentLight {
 	roleOrder := map[string]int{
 		constants.RoleMayor:    0,
 		constants.RoleDeacon:   1,
-		constants.RoleWitness:  2,
-		constants.RoleRefinery: 3,
-		constants.RoleCrew:     4,
-		constants.RolePolecat:  5,
+		constants.RoleDog:      2,
+		constants.RoleWitness:  3,
+		constants.RoleRefinery: 4,
+		constants.RoleCrew:     5,
+		constants.RolePolecat:  6,
 	}
 
 	var agents []*AgentLight
