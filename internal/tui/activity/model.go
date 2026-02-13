@@ -948,13 +948,19 @@ func parsePaneContentClaude(a *AgentLight, lines []string) {
 //
 // Tool panel patterns (visible in tmux capture-pane output):
 //
-//	┃  # Description comment                — tool description inside completed panel
+//	┃  # Explore Task                       — completed tool panel (# = done)
+//	┃  Audit security in API/auth (24 tc)   — task description inside panel
+//	┃  └ Read file.go                       — sub-tool inside panel
 //	┃  $ command args 2>&1                  — command inside completed panel
 //	┃  ✓ Success message                    — output inside completed panel
-//	$ command args 2>&1                     — bare command = actively executing (no ┃ frame)
+//	┃  ctrl+x right view subagents          — chrome inside panel
+//	⠃ Explore Task                          — active tool panel (braille spinner = running)
+//	Audit code quality/comments (69 tc)     — task description (active, no ┃ frame)
+//	└ Read file.go                          — sub-tool (active, no ┃ frame)
+//	$ command args 2>&1                     — bare command = actively executing
 //
 // The ┃ (box-drawing vertical) frame wraps completed tool results. Lines with
-// ┃ prefix are historical; bare $ or # lines near the bottom are active.
+// ┃ prefix are historical; bare lines near the bottom are from the active panel.
 func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	a.StatusText = ""
 	a.WaitingForHuman = false
@@ -976,14 +982,29 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	var spinnerStatus string // from braille spinner lines
 	var hasTodoInProgress bool
 
-	// Bash tool panel signals (from ┃-framed panels and bare $ lines)
-	var lastBashDesc string  // last "# description" from a tool panel
-	var lastBashCmd string   // last "$ command" from a tool panel
-	var activeBashCmd string // bare "$ command" NOT inside ┃ frame (= active execution)
+	// Tool panel signals
+	var lastPanelDesc string  // task description from last ┃-framed panel
+	var lastSubTool string    // last └ sub-tool from ┃-framed panel
+	var lastBashCmd string    // last "$ command" from ┃-framed panel
+	var activeBashCmd string  // bare "$ command" NOT inside ┃ frame (= active)
+	var activeSubTool string  // bare "└ ToolName" NOT inside ┃ frame (= active)
+	var activeTaskDesc string // task description from active (non-┃) panel
+
+	// Track whether we're inside a ┃-framed panel, and what the current
+	// active (non-┃) tool name is (from braille spinner line).
+	inPanel := false
+	var activeToolName string // from braille spinner: "⠃ Explore Task" → "Explore Task"
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
+
+		// Track ┃-framed panel boundaries
+		if strings.HasPrefix(trimmed, "┃") {
+			inPanel = true
+		} else if trimmed != "" && !isOpenCodeChromeLine(trimmed) {
+			inPanel = false
+		}
 
 		// Skip empty lines and pure box-drawing chrome
 		if trimmed == "" || isOpenCodeChromeLine(trimmed) {
@@ -991,37 +1012,65 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 
 		// ── ▣ line: ALWAYS present. Only extract elapsed time suffix. ──
-		// "▣  Build · claude-opus-4.6 · 2m 17s" → extract "2m 17s"
-		// "▣  Build · claude-opus-4.6" → no elapsed time (just started or idle)
 		if strings.HasPrefix(trimmed, "▣") {
 			elapsedTime = extractOpenCodeElapsedTime(trimmed)
 		}
 
 		// ── Tool execution: "✱ Grep ..." ──
-		// ✱ = tool invocation in flight (REAL working signal)
 		if strings.HasPrefix(trimmed, "✱") {
 			if tool := extractOpenCodeTool(trimmed); tool != "" {
 				lastToolLine = tool
 			}
 		}
 
-		// ── Bash tool panel content (inside ┃ frame = completed result) ──
-		// "┃  # Zombie scan" → description
-		// "┃  $ gt deacon zombie-scan 2>&1" → command
+		// ── Content inside ┃-framed panel (completed tool results) ──
 		if strings.HasPrefix(trimmed, "┃") {
 			inner := strings.TrimSpace(strings.TrimPrefix(trimmed, "┃"))
 			if strings.HasPrefix(inner, "# ") {
-				lastBashDesc = strings.TrimPrefix(inner, "# ")
+				// "# Explore Task" or "# Zombie scan" — tool name/description
+				lastPanelDesc = strings.TrimPrefix(inner, "# ")
 			} else if strings.HasPrefix(inner, "$ ") {
 				lastBashCmd = strings.TrimPrefix(inner, "$ ")
+			} else if strings.HasPrefix(inner, "└ ") || strings.HasPrefix(inner, "└") {
+				// "└ Read file.go" or "└ Bash cmd" — sub-tool
+				sub := strings.TrimSpace(strings.TrimPrefix(inner, "└"))
+				if sub != "" {
+					lastSubTool = sub
+				}
+			} else if inner != "" && !strings.HasPrefix(inner, "ctrl+") &&
+				!strings.HasPrefix(inner, "✓") && !strings.HasPrefix(inner, "○") {
+				// Task description lines like "Audit security in API/auth (24 toolcalls)"
+				// Heuristic: contains "toolcalls" or follows a # tool name line
+				if strings.Contains(inner, "toolcall") {
+					lastPanelDesc = inner
+				}
+			}
+			continue // Don't process ┃ lines through other matchers
+		}
+
+		// ── Braille spinner: "⠃ Explore Task" — active tool ──
+		if status := extractBrailleSpinner(trimmed); status != "" {
+			spinnerStatus = status
+			activeToolName = status // e.g., "Explore Task"
+		}
+
+		// ── Bare "└ ToolName args" — active sub-tool (no ┃ frame) ──
+		if strings.HasPrefix(trimmed, "└ ") || strings.HasPrefix(trimmed, "└") {
+			sub := strings.TrimSpace(strings.TrimPrefix(trimmed, "└"))
+			if sub != "" && !inPanel {
+				activeSubTool = sub
 			}
 		}
 
-		// ── Bare "$ command" (no ┃ prefix) — active command execution ──
-		// When OpenCode is currently running a Bash tool, the command line
-		// appears without the ┃ frame (the frame wraps only after completion).
-		if !strings.HasPrefix(trimmed, "┃") && strings.HasPrefix(trimmed, "$ ") {
+		// ── Bare "$ command" — active command execution ──
+		if strings.HasPrefix(trimmed, "$ ") && !inPanel {
 			activeBashCmd = strings.TrimPrefix(trimmed, "$ ")
+		}
+
+		// ── Task description (active, no ┃ frame) ──
+		// Lines containing "toolcall" after a spinner line are task descriptions
+		if strings.Contains(trimmed, "toolcall") && !inPanel {
+			activeTaskDesc = trimmed
 		}
 
 		// ── Pending operation: "~ Preparing write..." / "~ Writing command..." ──
@@ -1029,13 +1078,6 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			rest := strings.TrimSpace(trimmed[1:])
 			if rest != "" {
 				pendingOp = rest
-			}
-		}
-
-		// ── Braille spinner: "⠏ Analyzing..." ──
-		if spinnerStatus == "" {
-			if status := extractBrailleSpinner(trimmed); status != "" {
-				spinnerStatus = status
 			}
 		}
 
@@ -1060,58 +1102,83 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 	}
 
-	// Priority order for status:
-	// 1. Tool in flight (✱) — most informative (built-in OpenCode signal)
-	// 2. Active bare "$ command" — Bash tool currently executing
-	// 3. Pending operation (~) — about to do something
-	// 4. Braille spinner — active processing
-	// 5. Completed Bash panel (┃ $ command) — last thing that finished
-	// 6. Elapsed time from ▣ line — shows duration but not what's happening
-	// 7. Todo in-progress — sidebar signal (wide panes only)
+	// Priority order for CurrentTool + StatusText:
+	// 1. ✱ tool in flight — most informative (built-in OpenCode signal)
+	// 2. Active sub-tool (└ Read file.go) — shows what a Task is doing right now
+	// 3. Active bare "$ command" — Bash tool currently executing
+	// 4. Pending operation (~) — about to do something
+	// 5. Braille spinner — active processing (e.g., "Explore Task")
+	// 6. Completed panel sub-tool or command — last thing that finished
+	// 7. Elapsed time from ▣ line — shows duration but not what's happening
 	// 8. Nothing — agent is idle
+
+	// Helper: best available task description for status text
+	bestDesc := activeTaskDesc
+	if bestDesc == "" {
+		bestDesc = lastPanelDesc
+	}
 
 	if lastToolLine != "" {
 		a.CurrentTool = lastToolLine
-		if elapsedTime != "" {
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
+		} else if elapsedTime != "" {
+			a.StatusText = elapsedTime
+		}
+	} else if activeSubTool != "" {
+		// Active sub-tool from a Task panel (e.g., "└ Read file.go")
+		a.CurrentTool = formatSubTool(activeSubTool)
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
+		} else if activeToolName != "" {
+			a.StatusText = activeToolName
+		} else if elapsedTime != "" {
 			a.StatusText = elapsedTime
 		}
 	} else if activeBashCmd != "" {
-		// Active command execution (bare $ without ┃ frame)
 		a.CurrentTool = formatBashTool(activeBashCmd)
-		if lastBashDesc != "" {
-			a.StatusText = truncateStatus(lastBashDesc)
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
 		} else if elapsedTime != "" {
 			a.StatusText = elapsedTime
 		}
 	} else if pendingOp != "" {
 		a.StatusText = pendingOp
-		// If we have a recent bash command context, show it as the tool
 		if lastBashCmd != "" {
 			a.CurrentTool = formatBashTool(lastBashCmd)
 		}
 	} else if spinnerStatus != "" {
+		// Spinner without sub-tool — show spinner text as status, last sub-tool as tool
 		a.StatusText = spinnerStatus
+		if lastSubTool != "" {
+			a.CurrentTool = formatSubTool(lastSubTool)
+		}
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
+		}
+	} else if lastSubTool != "" && elapsedTime != "" {
+		// Completed panel with sub-tool — show for context
+		a.CurrentTool = formatSubTool(lastSubTool)
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
+		} else {
+			a.StatusText = elapsedTime
+		}
 	} else if lastBashCmd != "" && elapsedTime != "" {
-		// No active signal but we have a completed command and elapsed time —
-		// show the last command for context (agent may be processing its output)
 		a.CurrentTool = formatBashTool(lastBashCmd)
-		if lastBashDesc != "" {
-			a.StatusText = truncateStatus(lastBashDesc)
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc)
 		} else {
 			a.StatusText = elapsedTime
 		}
 	} else if elapsedTime != "" {
-		// Elapsed time alone (no tool/spinner) — agent is thinking or between steps
 		a.StatusText = elapsedTime
-		// Show description context if available
-		if lastBashDesc != "" {
-			a.StatusText = truncateStatus(lastBashDesc) + " · " + elapsedTime
+		if bestDesc != "" {
+			a.StatusText = truncateStatus(bestDesc) + " · " + elapsedTime
 		}
 	} else if hasTodoInProgress {
-		// No active signals but has in-progress todo — likely between operations
 		a.StatusText = ""
 	}
-	// else: no signals at all → agent is idle, StatusText stays ""
 
 	// HitLimit overrides stale tool display
 	if a.HitLimit {
@@ -1297,6 +1364,36 @@ func formatBashTool(cmd string) string {
 		cmd = cmd[:57] + "..."
 	}
 	return "Bash(" + cmd + ")"
+}
+
+// formatSubTool formats a sub-tool line from an OpenCode Task panel.
+// Input:  "Read winnow/refinery/rig/pkg/analyzer/maven.go"
+// Output: "Read(analyzer/maven.go)"
+// Input:  "Bash winnow/refinery/rig/cmd/winnow/scan.go"
+// Output: "Bash(cmd/winnow/scan.go)"
+// Extracts the tool name and shortens file paths for compact display.
+func formatSubTool(sub string) string {
+	sub = strings.TrimSpace(sub)
+	if sub == "" {
+		return ""
+	}
+	parts := strings.SplitN(sub, " ", 2)
+	toolName := parts[0]
+	if len(parts) == 1 {
+		return toolName
+	}
+	arg := strings.TrimSpace(parts[1])
+	// Shorten file paths: keep last 2-3 path components
+	if strings.Contains(arg, "/") {
+		components := strings.Split(arg, "/")
+		if len(components) > 3 {
+			arg = strings.Join(components[len(components)-3:], "/")
+		}
+	}
+	if len(arg) > 50 {
+		arg = arg[:47] + "..."
+	}
+	return toolName + "(" + arg + ")"
 }
 
 // extractOpenCodeContextPercent extracts context usage percent from OpenCode's header.
