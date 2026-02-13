@@ -537,14 +537,13 @@ func (m *Model) renderRigWithPositions(rig string, currentY *int) string {
 	*currentY++
 
 	var lines []string
-	*currentY++ // Border top line (╭──...──╮)
+	*currentY++ // Border top line (╭──...──╮); first agent is next row
 
 	for _, a := range agents {
 		*currentY++
 		a.renderY = *currentY
 		a.renderHeight = 1
 		lines = append(lines, m.renderLight(a))
-		*currentY++
 	}
 
 	content := strings.Join(lines, "\n")
@@ -747,7 +746,13 @@ func formatElapsed(d time.Duration) string {
 
 // renderHelp renders the help bar.
 func (m *Model) renderHelp() string {
-	return helpStyle.Render("  q: quit  •  hover for details  •  double-click: attach  •  ⚠ = needs human input")
+	// DEBUG: show all agent renderY values for drift diagnosis
+	var debugParts []string
+	for _, a := range m.agents {
+		debugParts = append(debugParts, fmt.Sprintf("%s:%d", a.Name, a.renderY))
+	}
+	debug := statusDimStyle.Render(fmt.Sprintf("  [mouseY=%d agents: %s]", m.mouseY, strings.Join(debugParts, " ")))
+	return helpStyle.Render("  q: quit  •  double-click: attach  •  ⚠ = needs human") + "\n" + debug
 }
 
 // activeFlash returns the current flash message if it's still within its display window (3s).

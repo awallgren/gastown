@@ -341,9 +341,9 @@ func (m *Model) blinkTick() tea.Cmd {
 	})
 }
 
-// pollTick fires every 1s to re-poll tmux.
+// pollTick fires every 3s to re-poll tmux. (DEBUG: slowed from 1s)
 func (m *Model) pollTick() tea.Cmd {
-	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 		return pollMsg{}
 	})
 }
