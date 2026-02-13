@@ -384,19 +384,31 @@ func (m *Model) renderLight(a *AgentLight) string {
 	elapsedStr := formatElapsed(elapsed)
 	showElapsed := !strings.Contains(statusStr, "·") // skip when status has timing
 
-	// Build styled indicators separately (ANSI codes break rune-based truncation)
-	var indicators []string // styled strings appended AFTER truncation
-	var indicatorsWidth int // visual width of all indicators
+	// Right-justified indicators (context %, session limit) go at the far right
+	// of the line. Left side has: icon name bar status elapsed.
+	// If the status text is long, the context indicator shrinks from
+	// "xx% til compact" to just "xx%".
+
+	// Collect right-side indicators
+	var rightParts []string   // styled strings for right side
+	var rightFullWidth int    // visual width with full labels
+	var rightCompactWidth int // visual width with compact labels
 
 	if a.SessionLimitPct > 0 {
 		ind := renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
-		indicators = append(indicators, ind)
-		indicatorsWidth += 1 + lipgloss.Width(ind) // " " + indicator
+		rightParts = append(rightParts, ind)
+		w := lipgloss.Width(ind)
+		rightFullWidth += w
+		rightCompactWidth += w // session limit doesn't have a compact form
 	}
 	if a.ContextPercent > 0 {
-		ind := renderContextIndicator(a.ContextPercent)
-		indicators = append(indicators, ind)
-		indicatorsWidth += 1 + lipgloss.Width(ind)
+		rightFullWidth += lipgloss.Width(renderContextIndicator(a.ContextPercent, false))
+		rightCompactWidth += lipgloss.Width(renderContextIndicator(a.ContextPercent, true))
+	}
+	if len(rightParts) > 0 || a.ContextPercent > 0 {
+		// Account for spacing between right-side items and 1-space separator
+		rightFullWidth += 1 // at least 1 space gap from left content
+		rightCompactWidth += 1
 	}
 
 	// Measure actual visual width of the fixed prefix (handles emoji + ANSI correctly)
@@ -410,9 +422,25 @@ func (m *Model) renderLight(a *AgentLight) string {
 
 	// Content width inside rig panel: outer border(4) + rig border(4) + safety(2)
 	contentWidth := m.width - 10
-	availableForStatus := contentWidth - prefixWidth - elapsedWidth - indicatorsWidth
+	leftBudget := contentWidth - prefixWidth - rightFullWidth
+	if leftBudget < 10 {
+		leftBudget = 10
+	}
+
+	// See if we need compact mode for right indicators
+	useCompact := false
+	availableForStatus := leftBudget - elapsedWidth
 	if availableForStatus < 10 {
-		availableForStatus = 10
+		// Try with compact indicators
+		leftBudget = contentWidth - prefixWidth - rightCompactWidth
+		if leftBudget < 10 {
+			leftBudget = 10
+		}
+		availableForStatus = leftBudget - elapsedWidth
+		if availableForStatus < 10 {
+			availableForStatus = 10
+		}
+		useCompact = true
 	}
 
 	// Truncate status to fit (statusStr is plain text here, no ANSI)
@@ -421,16 +449,35 @@ func (m *Model) renderLight(a *AgentLight) string {
 		statusStr = string(statusRunes[:availableForStatus-3]) + "..."
 	}
 
-	// Build the line
+	// Build the left side of the line
 	line := a.Icon + " " + nameStyle.Render(displayName) + " " + bar
 	if statusStr != "" {
 		line += "  " + stStyle.Render(statusStr)
 	}
-	for _, ind := range indicators {
-		line += " " + ind
-	}
 	if showElapsed {
 		line += "  " + statusDimStyle.Render(elapsedStr)
+	}
+	leftWidth := lipgloss.Width(line)
+
+	// Build right-justified indicators
+	var rightSide string
+	if a.SessionLimitPct > 0 {
+		rightSide += renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
+	}
+	if a.ContextPercent > 0 {
+		if rightSide != "" {
+			rightSide += " "
+		}
+		rightSide += renderContextIndicator(a.ContextPercent, useCompact)
+	}
+
+	if rightSide != "" {
+		rightWidth := lipgloss.Width(rightSide)
+		gap := contentWidth - leftWidth - rightWidth
+		if gap < 1 {
+			gap = 1
+		}
+		line += strings.Repeat(" ", gap) + rightSide
 	}
 
 	return line
@@ -677,12 +724,18 @@ func (m *Model) renderHoverDetail() string {
 }
 
 // renderContextIndicator returns a compact text indicator for context remaining.
-func renderContextIndicator(percent int) string {
+// If compact is true, renders just "xx%" instead of "xx% til compact".
+func renderContextIndicator(percent int, compact bool) string {
 	if percent <= 0 || percent > 100 {
 		return ""
 	}
 
-	text := fmt.Sprintf("%d%% til compact", percent)
+	var text string
+	if compact {
+		text = fmt.Sprintf("%d%%", percent)
+	} else {
+		text = fmt.Sprintf("%d%% til compact", percent)
+	}
 
 	var style lipgloss.Style
 	switch {

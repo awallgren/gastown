@@ -959,6 +959,94 @@ func parsePaneContentClaude(a *AgentLight, lines []string) {
 //	└ Read file.go                          — sub-tool (active, no ┃ frame)
 //	$ command args 2>&1                     — bare command = actively executing
 //
+// stripOpenCodeSidebar detects and removes the right-hand sidebar that OpenCode
+// renders on wide terminals (pane width > 120). The sidebar is 42 columns wide
+// and contains Todo items, Context info, Modified Files, LSP status, etc.
+//
+// Detection: scan for lines where a large whitespace gap (8+ spaces) is followed
+// by known sidebar markers (Context, ▼ Todo, [✓], [•], [ ], • gopls, etc.).
+// The leftmost such gap position across all detected lines gives us the sidebar
+// column. All lines are then truncated at that column.
+//
+// This prevents sidebar content (todo items, token counts, file lists) from
+// contaminating the main-content parser and causing false tool/status matches.
+func stripOpenCodeSidebar(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+
+	// Known sidebar-only markers. These never appear as main content in
+	// the left panel at the positions where we'd see them after a big gap.
+	sidebarMarkers := []string{
+		"Context",
+		"tokens",
+		"% used",
+		"spent",
+		"▼ Todo",
+		"▼ Modified Files",
+		"LSP",
+		"LSPs will activate",
+		"• gopls",
+		"• OpenCode",
+		"[✓]",
+		"[•]",
+		"[ ]",
+	}
+
+	// Scan lines to find the sidebar column. We look for lines where:
+	// 1. Total length > 100 (sidebar only appears on wide panes)
+	// 2. There's a gap of 8+ spaces
+	// 3. Text after the gap matches a sidebar marker
+	sidebarCol := 0
+	for _, line := range lines {
+		if len(line) < 100 {
+			continue
+		}
+		// Find gaps of 8+ spaces and check what follows
+		for i := 0; i < len(line)-10; i++ {
+			if line[i] != ' ' {
+				continue
+			}
+			// Count consecutive spaces
+			j := i + 1
+			for j < len(line) && line[j] == ' ' {
+				j++
+			}
+			gapLen := j - i
+			if gapLen < 8 || j >= len(line) {
+				continue
+			}
+			// Check if text after gap matches a sidebar marker
+			after := strings.TrimSpace(line[j:])
+			for _, marker := range sidebarMarkers {
+				if strings.HasPrefix(after, marker) {
+					// Found sidebar boundary. Use the start of the gap
+					// as the truncation point (conservative).
+					if sidebarCol == 0 || i < sidebarCol {
+						sidebarCol = i
+					}
+					break
+				}
+			}
+		}
+	}
+
+	if sidebarCol == 0 {
+		return lines // no sidebar detected
+	}
+
+	// Truncate all lines at the sidebar column and trim trailing whitespace
+	result := make([]string, len(lines))
+	for i, line := range lines {
+		if len(line) > sidebarCol {
+			result[i] = strings.TrimRight(line[:sidebarCol], " ")
+		} else {
+			result[i] = line
+		}
+	}
+	return result
+}
+
 // The ┃ (box-drawing vertical) frame wraps completed tool results. Lines with
 // ┃ prefix are historical; bare lines near the bottom are from the active panel.
 func parsePaneContentOpenCode(a *AgentLight, lines []string) {
@@ -975,12 +1063,30 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		return
 	}
 
+	// Extract context percent from the sidebar BEFORE stripping it.
+	// The sidebar shows "N% used" for context usage — we invert to get remaining.
+	for _, line := range lines {
+		if pct := extractOpenCodeSidebarContextPercent(line); pct > 0 {
+			a.ContextPercent = pct
+		}
+	}
+
+	// Strip the right-hand sidebar before parsing. On wide panes (>120 cols),
+	// OpenCode renders a 42-column sidebar with Todo, Context, Modified Files
+	// etc. that would otherwise contaminate tool/status detection.
+	lines = stripOpenCodeSidebar(lines)
+
+	if len(lines) == 0 {
+		return
+	}
+
 	// Collect signals from all lines.
 	var elapsedTime string   // from ▣ line (e.g., "2m 17s")
 	var lastToolLine string  // last ✱ tool invocation seen
 	var pendingOp string     // from ~ lines
 	var spinnerStatus string // from braille spinner lines
 	var hasTodoInProgress bool
+	var agentIsStreaming bool // true when "esc interrupt" visible (agent is generating)
 
 	// Tool panel signals
 	var lastPanelDesc string  // task description from last completed ┃-framed panel
@@ -1001,6 +1107,12 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
 
+		// ── "esc interrupt" means the agent is actively streaming/working ──
+		// Detect this BEFORE the chrome filter since isOpenCodeChromeLine skips it.
+		if strings.Contains(trimmed, "esc interrupt") {
+			agentIsStreaming = true
+		}
+
 		// Skip empty lines and pure box-drawing chrome
 		if trimmed == "" || isOpenCodeChromeLine(trimmed) {
 			continue
@@ -1011,8 +1123,18 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			elapsedTime = extractOpenCodeElapsedTime(trimmed)
 		}
 
-		// ── Tool execution: "✱ Grep ..." ──
-		if strings.HasPrefix(trimmed, "✱") {
+		// ── Tool execution: "✱ Grep ..." / "← Write ..." / "% WebFetch ..." etc. ──
+		// OpenCode uses different icons per tool type, all indicating active work:
+		//   ✱  Glob/Grep (active)
+		//   ←  Write/Edit (active)
+		//   %  WebFetch (active)
+		//   ◇  CodeSearch (active)
+		//   ◈  WebSearch (active)
+		//   ⚙  generic tool (active)
+		//   →  Read/List/completed results (NOT active — skip)
+		if strings.HasPrefix(trimmed, "✱") || strings.HasPrefix(trimmed, "←") ||
+			strings.HasPrefix(trimmed, "%") || strings.HasPrefix(trimmed, "◇") ||
+			strings.HasPrefix(trimmed, "◈") || strings.HasPrefix(trimmed, "⚙") {
 			if tool := extractOpenCodeTool(trimmed); tool != "" {
 				lastToolLine = tool
 			}
@@ -1050,7 +1172,7 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 						lastSubTool = sub
 					}
 				}
-			} else if strings.Contains(inner, "toolcall") {
+			} else if strings.Contains(inner, "toolcall") || strings.Contains(inner, " tc)") {
 				if panelIsActive {
 					activeTaskDesc = inner
 				} else {
@@ -1098,8 +1220,8 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			}
 		}
 
-		// Task description with toolcall count
-		if strings.Contains(trimmed, "toolcall") {
+		// Task description with toolcall count: "(N toolcalls)" or "(N tc)"
+		if strings.Contains(trimmed, "toolcall") || strings.Contains(trimmed, " tc)") {
 			activeTaskDesc = trimmed
 		}
 
@@ -1107,7 +1229,15 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		if strings.HasPrefix(trimmed, "~") {
 			rest := strings.TrimSpace(trimmed[1:])
 			if rest != "" {
-				pendingOp = rest
+				// "Updating todos..." is transient noise — only use as fallback
+				if strings.Contains(strings.ToLower(rest), "updating todo") {
+					if pendingOp == "" {
+						pendingOp = rest
+					}
+					// Don't overwrite a more meaningful pendingOp
+				} else {
+					pendingOp = rest
+				}
 			}
 		}
 
@@ -1129,6 +1259,22 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			strings.Contains(lower, "quota exceeded") {
 			a.HitLimit = true
 			a.LimitResetInfo = extractLimitResetInfo(line)
+		}
+
+		// ── OpenCode retry pattern: "[retrying in Xs attempt #N]" ──
+		if strings.Contains(lower, "retrying in") && strings.Contains(lower, "attempt") {
+			a.RateLimited = true
+		}
+
+		// ── OpenCode permission dialog (bare, outside ┃ frames) ──
+		// "△ Permission required" or the options line "Allow once | Allow always | Reject"
+		if strings.HasPrefix(trimmed, "△") && strings.Contains(trimmed, "Permission") {
+			a.WaitingForHuman = true
+			a.WaitingReason = "permission"
+		}
+		if strings.Contains(trimmed, "Allow once") && strings.Contains(trimmed, "Allow always") {
+			a.WaitingForHuman = true
+			a.WaitingReason = "permission"
 		}
 	}
 
@@ -1207,6 +1353,14 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		if bestDescForActive != "" && activeSpinnerCount <= 1 {
 			a.StatusText = truncateStatus(bestDescForActive)
 		}
+	} else if agentIsStreaming {
+		// "esc interrupt" visible but no tool/spinner signals — agent is
+		// streaming its response (thinking/writing prose).
+		if elapsedTime != "" {
+			a.StatusText = "streaming · " + elapsedTime
+		} else {
+			a.StatusText = "streaming"
+		}
 	} else if elapsedTime != "" {
 		// No active signals — only completed panels + elapsed time.
 		// Show elapsed time; only add active task descriptions (not stale
@@ -1281,7 +1435,7 @@ func isBoxDrawingOnly(s string) bool {
 // Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s"
 // Output: "Compaction · 1m 6s"
 // Input:  "▣  Build · claude-opus-4.6"
-// Output: "" (no elapsed time = no useful status)
+// Output: "Build" (no elapsed time — return mode name as fallback)
 func extractOpenCodeElapsedTime(line string) string {
 	trimmed := strings.TrimSpace(line)
 	idx := strings.Index(trimmed, "▣")
@@ -1295,18 +1449,27 @@ func extractOpenCodeElapsedTime(line string) string {
 
 	// Split on " · " to get segments: [taskName, model, elapsed?]
 	segments := strings.Split(rest, " · ")
+	taskName := strings.TrimSpace(segments[0])
+
 	if len(segments) < 3 {
-		return "" // No elapsed time segment
+		// No elapsed time segment — return mode name as fallback
+		if taskName != "" {
+			return taskName
+		}
+		return ""
 	}
 
 	// Last segment should look like a duration: "2m 17s", "45s", "1h 3m"
 	lastSeg := strings.TrimSpace(segments[len(segments)-1])
 	if !looksLikeDuration(lastSeg) {
+		// Not a duration — return mode name as fallback
+		if taskName != "" {
+			return taskName
+		}
 		return ""
 	}
 
 	// Return "TaskName · elapsed" (skip the model name, it's noise)
-	taskName := strings.TrimSpace(segments[0])
 	if taskName != "" {
 		return taskName + " · " + lastSeg
 	}
@@ -1359,15 +1522,25 @@ func extractBrailleSpinner(line string) string {
 // extractOpenCodeTool extracts a tool invocation from OpenCode's tool lines.
 // Input:  "✱ Grep \"defaultRetryConfig\" in pkg/determiner (4 matches)"
 // Output: "Grep(defaultRetryConfig)"
+// Input:  "← Write /path/to/file.go"
+// Output: "Write(/path/to/file.go)"
 // Input:  "→ Read pkg/determiner/claude.go [offset=115, limit=20]"
 // Output: "" (→ is a result, not a current invocation)
 func extractOpenCodeTool(line string) string {
 	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "✱") {
-		return ""
+
+	// All active tool icon prefixes (multi-byte runes)
+	prefixes := []string{"✱", "←", "%", "◇", "◈", "⚙"}
+	var rest string
+	found := false
+	for _, p := range prefixes {
+		if strings.HasPrefix(trimmed, p) {
+			rest = strings.TrimSpace(trimmed[len(p):])
+			found = true
+			break
+		}
 	}
-	rest := strings.TrimSpace(trimmed[len("✱"):])
-	if rest == "" {
+	if !found || rest == "" {
 		return ""
 	}
 
@@ -1462,6 +1635,37 @@ func extractOpenCodeContextPercent(line string) int {
 				}
 			}
 		}
+	}
+	return 0
+}
+
+// extractOpenCodeSidebarContextPercent extracts context usage from the sidebar.
+// The sidebar shows "N% used" (e.g., "42% used") as a standalone line in the
+// right panel. This appears on wide panes (>120 cols) where the sidebar is visible.
+// We need to extract this BEFORE stripping the sidebar.
+// Returns remaining percent (100 - usage), or 0 if not found.
+func extractOpenCodeSidebarContextPercent(line string) int {
+	trimmed := strings.TrimSpace(line)
+	// The sidebar "N% used" appears after a large whitespace gap.
+	// Look for the pattern anywhere in the line: "N% used"
+	idx := strings.Index(trimmed, "% used")
+	if idx < 0 {
+		return 0
+	}
+	// Walk backward from "% used" to find the number
+	numEnd := idx
+	numStart := numEnd - 1
+	for numStart >= 0 && trimmed[numStart] >= '0' && trimmed[numStart] <= '9' {
+		numStart--
+	}
+	numStart++ // point to first digit
+	if numStart >= numEnd {
+		return 0
+	}
+	numStr := trimmed[numStart:numEnd]
+	var pct int
+	if _, err := fmt.Sscanf(numStr, "%d", &pct); err == nil && pct >= 0 && pct <= 100 {
+		return 100 - pct
 	}
 	return 0
 }
@@ -1720,9 +1924,14 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 	attachCmd := fmt.Sprintf("%s attach -t %s", tmuxPath, sessionName)
 
 	// Try iTerm2 first (very common on macOS for dev)
+	// Request 192x60 so the agent TUI (especially OpenCode's sidebar) renders fully.
 	iterm := exec.Command("osascript", "-e", fmt.Sprintf(
 		`tell application "iTerm2"
-			create window with default profile command "%s"
+			set newWindow to (create window with default profile command "%s")
+			tell current session of current window
+				set columns to 192
+				set rows to 60
+			end tell
 		end tell`, attachCmd))
 	if err := iterm.Start(); err == nil {
 		m.flashMessage = "Opened iTerm2 → " + sessionName
@@ -1735,6 +1944,9 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 		`tell application "Terminal"
 			do script "%s"
 			activate
+			-- resize the front window to 192 columns x 60 rows
+			set number of columns of front window to 192
+			set number of rows of front window to 60
 		end tell`, attachCmd))
 	if err := terminal.Start(); err == nil {
 		m.flashMessage = "Opened Terminal → " + sessionName
