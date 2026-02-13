@@ -922,16 +922,8 @@ func extractCurrentTool(line string) string {
 		return "" // No paren or name too long - not a tool
 	}
 
-	// Valid tool execution - truncate if too long
-	if len(rest) > 60 {
-		// Try to truncate at end of args if possible
-		if closeIdx := strings.Index(rest, ")"); closeIdx > 0 && closeIdx < 60 {
-			rest = rest[:closeIdx+1]
-		} else {
-			rest = rest[:57] + "..."
-		}
-	}
-	return rest
+	// Light safety trim - real truncation happens in renderLight based on terminal width
+	return truncateStatus(rest)
 }
 
 // truncateStatus does a light safety trim. Real truncation happens in
