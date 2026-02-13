@@ -139,7 +139,6 @@ var (
 				Border(lipgloss.DoubleBorder()).
 				BorderForeground(colorBorder).
 				Padding(0, 1)
-
 )
 
 // render produces the full TUI output.
@@ -609,6 +608,11 @@ func (m *Model) renderHoverDetail() string {
 
 	var parts []string
 	parts = append(parts, lipgloss.NewStyle().Bold(true).Render(a.Icon+" "+a.SessionName))
+
+	// Show agent type for non-Claude agents (Claude is the default, so showing it is noise)
+	if a.AgentType != "" && a.AgentType != "claude" {
+		parts = append(parts, statusDimStyle.Render("agent: "+a.AgentType))
+	}
 
 	// Show current tool execution (highest priority info)
 	if a.CurrentTool != "" {

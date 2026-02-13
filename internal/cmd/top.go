@@ -77,17 +77,25 @@ Supported event types for refinery:
   merge_failed     - When merge fails
   queue_processed  - When refinery finishes processing queue
 
+Supported event types for agent activity (emitted by agent plugins for gt top):
+  tool_started     - Agent began executing a tool (--status=tool info, --message=session)
+  tool_finished    - Agent finished executing a tool (--status=tool name, --message=session)
+  agent_idle       - Agent is idle, waiting for prompt (--message=session)
+
 Common options:
   --actor    Who is emitting the event (e.g., greenplace/witness)
   --rig      Which rig the event is about
-  --message  Human-readable message
+  --message  Human-readable message (or tmux session name for agent events)
+  --status   Status info (or tool name/args for agent events)
 
 Examples:
   gt activity emit patrol_started --rig greenplace --count 3
   gt activity emit polecat_checked --rig greenplace --polecat Toast --status working --issue gp-xyz
   gt activity emit polecat_nudged --rig greenplace --polecat Toast --reason "idle for 10 minutes"
   gt activity emit escalation_sent --rig greenplace --target Toast --to mayor --reason "unresponsive"
-  gt activity emit patrol_complete --rig greenplace --count 3 --message "All polecats healthy"`,
+  gt activity emit patrol_complete --rig greenplace --count 3 --message "All polecats healthy"
+  gt activity emit tool_started --actor polecat --status "Bash(git status)" --message "gt-gastown-Toast"
+  gt activity emit tool_finished --actor polecat --status "Bash" --message "gt-gastown-Toast"`,
 	Args: cobra.ExactArgs(1),
 	RunE: runActivityEmit,
 }
@@ -154,6 +162,26 @@ func runActivityEmit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--rig, --target, and --to are required for escalation_sent events")
 		}
 		payload = events.EscalationPayload(activityRig, activityTarget, activityTo, activityReason)
+
+	case events.TypeToolStarted, events.TypeToolFinished:
+		// Agent tool execution events (emitted by gastown.js plugin for gt top).
+		// --status carries the tool name/args (e.g., "Bash(git status)")
+		// --message carries the tmux session name for agent matching.
+		payload = make(map[string]interface{})
+		if activityStatus != "" {
+			payload["tool"] = activityStatus
+		}
+		if activityMessage != "" {
+			payload["session"] = activityMessage
+		}
+
+	case events.TypeAgentIdle:
+		// Agent idle event — signals the agent is waiting for a prompt.
+		// --message carries the tmux session name for agent matching.
+		payload = make(map[string]interface{})
+		if activityMessage != "" {
+			payload["session"] = activityMessage
+		}
 
 	case events.TypeMergeStarted, events.TypeMerged, events.TypeMergeFailed, events.TypeMergeSkipped:
 		// Refinery events - flexible payload

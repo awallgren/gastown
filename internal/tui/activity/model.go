@@ -4,29 +4,34 @@
 package activity
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // ActivityLevel represents how recently an agent was active.
 type ActivityLevel int
 
 const (
-	LevelActive      ActivityLevel = iota // activity timestamp changed in last 3s
-	LevelRecent                           // changed in last 30s
-	LevelWarm                             // changed in last 2m
-	LevelCool                             // changed in last 5m
-	LevelCold                             // no change in 5m+
-	LevelRateLimited                      // hit rate limit
-	LevelHitLimit                         // hit usage cap - agent dead until reset
-	LevelWaitingForHuman                  // blocked waiting for human input
-	LevelDead                             // no session
+	LevelActive          ActivityLevel = iota // activity timestamp changed in last 3s
+	LevelRecent                               // changed in last 30s
+	LevelWarm                                 // changed in last 2m
+	LevelCool                                 // changed in last 5m
+	LevelCold                                 // no change in 5m+
+	LevelRateLimited                          // hit rate limit
+	LevelHitLimit                             // hit usage cap - agent dead until reset
+	LevelWaitingForHuman                      // blocked waiting for human input
+	LevelDead                                 // no session
 )
 
 // AgentLight represents one "LED" on the panel.
@@ -36,6 +41,7 @@ type AgentLight struct {
 	Role        string
 	Rig         string
 	SessionName string
+	AgentType   string // "claude", "opencode", "gemini", etc. (cached, read once from GT_AGENT)
 
 	// Tracking activity changes (is text scrolling?)
 	CurActivity    int64     // current window_activity unix timestamp
@@ -44,22 +50,22 @@ type AgentLight struct {
 	Level          ActivityLevel
 
 	// Pane-derived status (updated every poll)
-	StatusText      string // current activity description from pane
-	WaitingForHuman bool   // agent is blocked on human input
-	WaitingReason   string // why waiting (e.g., "user prompt", "permission")
-	RateLimited     bool   // pane shows rate limit message
-	HitLimit        bool   // agent hit usage/token limit (dead until reset)
-	LimitResetInfo  string // extracted reset info (e.g., "resets 2pm (America/Los_Angeles)")
-	ContextPercent  int    // context remaining (0-100, 0=unknown)
-	CurrentTool     string // currently executing tool/command (e.g., "Bash(git status)")
-	SessionLimitPct int    // session usage percent (0=unknown, sticky)
+	StatusText        string // current activity description from pane
+	WaitingForHuman   bool   // agent is blocked on human input
+	WaitingReason     string // why waiting (e.g., "user prompt", "permission")
+	RateLimited       bool   // pane shows rate limit message
+	HitLimit          bool   // agent hit usage/token limit (dead until reset)
+	LimitResetInfo    string // extracted reset info (e.g., "resets 2pm (America/Los_Angeles)")
+	ContextPercent    int    // context remaining (0-100, 0=unknown)
+	CurrentTool       string // currently executing tool/command (e.g., "Bash(git status)")
+	SessionLimitPct   int    // session usage percent (0=unknown, sticky)
 	SessionLimitReset string // when the session limit resets (sticky)
 
 	// Hover tooltip info
-	CurrentBead   string // detected bead ID from pane content
-	RecentOutput  string // last few lines of output
-	renderY       int    // Y position in render (for hover detection)
-	renderHeight  int    // height of rendered agent (for hover detection)
+	CurrentBead  string // detected bead ID from pane content
+	RecentOutput string // last few lines of output
+	renderY      int    // Y position in render (for hover detection)
+	renderHeight int    // height of rendered agent (for hover detection)
 }
 
 // Model is the bubbletea model for the blinkenlights TUI.
@@ -72,13 +78,17 @@ type Model struct {
 	rigs   []string // ordered rig names (hq first)
 
 	// Animation state
-	blinkOn  bool // toggles every tick for blink effect
-	tickNum  int  // counts ticks for sparkle effects
+	blinkOn bool // toggles every tick for blink effect
+	tickNum int  // counts ticks for sparkle effects
 
 	// Mouse hover state
 	hoveredAgent *AgentLight // currently hovered agent
 	mouseX       int
 	mouseY       int
+
+	// Plugin event consumption (for non-Claude agents like OpenCode)
+	townRoot         string      // cached town root for reading events file
+	recentToolEvents []toolEvent // recent tool_started events (< 15s old)
 
 	// Stats
 	totalAgents      int
@@ -93,8 +103,158 @@ type Model struct {
 
 // NewModel creates a new activity TUI model.
 func NewModel() *Model {
+	// Best-effort town root discovery for reading events file.
+	townRoot, _ := workspace.FindFromCwd()
 	return &Model{
-		agents: make([]*AgentLight, 0),
+		agents:   make([]*AgentLight, 0),
+		townRoot: townRoot,
+	}
+}
+
+// toolEvent represents a parsed tool_started or tool_finished event
+// from the events JSONL file, used to populate CurrentTool for non-Claude agents.
+type toolEvent struct {
+	Timestamp time.Time
+	Actor     string // e.g., "gastown/crew/joe"
+	Session   string // tmux session name (from payload.session)
+	Tool      string // e.g., "Bash(git status)"
+	EventType string // "tool_started" or "tool_finished"
+}
+
+// readRecentToolEvents reads the last N lines of the events JSONL file
+// and extracts tool_started/tool_finished events from the last 15 seconds.
+// This is called on each poll to provide tool execution info for non-Claude agents.
+func (m *Model) readRecentToolEvents() {
+	m.recentToolEvents = nil
+
+	if m.townRoot == "" {
+		return
+	}
+
+	eventsPath := filepath.Join(m.townRoot, ".events.jsonl")
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Seek to near the end of the file — we only care about recent events.
+	// Read last 8KB which should contain plenty of recent lines.
+	const tailSize = 8192
+	info, err := f.Stat()
+	if err != nil {
+		return
+	}
+	if info.Size() > tailSize {
+		if _, err := f.Seek(-tailSize, 2); err != nil {
+			return
+		}
+	}
+
+	cutoff := time.Now().Add(-15 * time.Second)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Quick pre-filter: only parse lines containing tool event types
+		lineStr := string(line)
+		if !strings.Contains(lineStr, "tool_started") && !strings.Contains(lineStr, "tool_finished") {
+			continue
+		}
+
+		var evt struct {
+			Timestamp string                 `json:"ts"`
+			Type      string                 `json:"type"`
+			Actor     string                 `json:"actor"`
+			Payload   map[string]interface{} `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &evt); err != nil {
+			continue
+		}
+		if evt.Type != "tool_started" && evt.Type != "tool_finished" {
+			continue
+		}
+
+		ts, err := time.Parse(time.RFC3339, evt.Timestamp)
+		if err != nil {
+			continue
+		}
+		if ts.Before(cutoff) {
+			continue
+		}
+
+		te := toolEvent{
+			Timestamp: ts,
+			Actor:     evt.Actor,
+			EventType: evt.Type,
+		}
+		if evt.Payload != nil {
+			if tool, ok := evt.Payload["tool"].(string); ok {
+				te.Tool = tool
+			}
+			if session, ok := evt.Payload["session"].(string); ok {
+				te.Session = session
+			}
+		}
+		m.recentToolEvents = append(m.recentToolEvents, te)
+	}
+}
+
+// applyToolEvents populates CurrentTool for non-Claude agents using plugin-emitted events.
+// Matches events to agents by tmux session name (preferred) or actor name (fallback).
+func (m *Model) applyToolEvents() {
+	if len(m.recentToolEvents) == 0 {
+		return
+	}
+
+	// Build index of agents that need event-based tool info (non-Claude only)
+	needsEvents := make(map[string]*AgentLight)
+	for _, a := range m.agents {
+		if !isClaudeAgent(a.AgentType) {
+			needsEvents[a.SessionName] = a
+		}
+	}
+	if len(needsEvents) == 0 {
+		return
+	}
+
+	// Process events in chronological order — last event for a session wins.
+	// tool_finished clears the tool; tool_started sets it.
+	for _, evt := range m.recentToolEvents {
+		// Match by session name (most reliable)
+		if evt.Session != "" {
+			if a, ok := needsEvents[evt.Session]; ok {
+				if evt.EventType == "tool_started" {
+					a.CurrentTool = evt.Tool
+				} else {
+					a.CurrentTool = "" // tool_finished clears
+				}
+				continue
+			}
+		}
+		// Fallback: match by actor role path against session name
+		// Actor format: "gastown/crew/joe" → session: "gt-gastown-crew-joe" or similar
+		// This is a rough heuristic — session name matching is preferred
+		if evt.Actor != "" {
+			for _, a := range needsEvents {
+				// Check if the actor's agent name is contained in the session name
+				parts := strings.Split(evt.Actor, "/")
+				if len(parts) > 0 {
+					lastPart := parts[len(parts)-1]
+					if strings.Contains(a.SessionName, lastPart) {
+						if evt.EventType == "tool_started" {
+							a.CurrentTool = evt.Tool
+						} else {
+							a.CurrentTool = ""
+						}
+						break
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -113,8 +273,8 @@ type (
 	sessionsMsg struct {
 		sessions []sessionInfo
 	}
-	blinkMsg  struct{}
-	pollMsg   struct{}
+	blinkMsg struct{}
+	pollMsg  struct{}
 )
 
 type sessionInfo struct {
@@ -231,9 +391,11 @@ func (m *Model) updateAgents(sessions []sessionInfo) {
 
 		agent, ok := existing[s.name]
 		if !ok {
-			// New agent
+			// New agent — detect agent type from tmux environment (one-time read)
+			agentType := detectAgentType(s.name)
 			agent = &AgentLight{
 				SessionName:    s.name,
+				AgentType:      agentType,
 				CurActivity:    s.activity,
 				PrevActivity:   s.activity,
 				LastChangeTime: now,
@@ -335,6 +497,12 @@ func (m *Model) updateAgents(sessions []sessionInfo) {
 		}
 	}
 	m.totalAgents = len(m.agents)
+
+	// Apply plugin-emitted tool events for non-Claude agents.
+	// This populates CurrentTool from events written by gastown.js plugin
+	// hooks (tool.execute.before/after), sidestepping pane parsing.
+	m.readRecentToolEvents()
+	m.applyToolEvents()
 
 	// Rebuild rig ordering
 	m.rebuildRigOrder()
@@ -570,10 +738,33 @@ func extractTaskName(line string) string {
 }
 
 // parsePaneContent analyzes captured pane lines to extract status information.
-// Lines are ordered top-to-bottom (time flows downward). We first strip Claude
-// Code UI chrome from the bottom, then scan upward from the most recent real
-// content to find status signals.
+// Lines are ordered top-to-bottom (time flows downward). For Claude Code sessions,
+// we strip UI chrome from the bottom, then scan upward from the most recent real
+// content to find status signals. For OpenCode agents, we parse their distinctive
+// TUI patterns (▣ working indicator, ✱ tools, context %). For other non-Claude
+// agents, we use a generic parser.
 func parsePaneContent(a *AgentLight, lines []string) {
+	// Lazy agent type detection from pane content.
+	// GT_AGENT is rarely set in tmux env — detect from TUI signatures instead.
+	// Once detected (non-empty), the type is cached and never re-detected.
+	if a.AgentType == "" {
+		a.AgentType = detectAgentTypeFromPane(lines)
+	}
+
+	// Dispatch to agent-specific parser.
+	switch a.AgentType {
+	case "opencode":
+		parsePaneContentOpenCode(a, lines)
+	default:
+		// Claude Code or unknown agents use the Claude parser.
+		parsePaneContentClaude(a, lines)
+	}
+}
+
+// parsePaneContentClaude is the pane parser for Claude Code sessions.
+// Strips UI chrome from the bottom, then scans upward from the most recent real
+// content to find status signals (✻ working indicator, ⏺ tool execution, etc.).
+func parsePaneContentClaude(a *AgentLight, lines []string) {
 	a.StatusText = ""
 	a.WaitingForHuman = false
 	a.WaitingReason = ""
@@ -716,6 +907,231 @@ func parsePaneContent(a *AgentLight, lines []string) {
 			a.StatusText = taskName
 		}
 	}
+}
+
+// parsePaneContentOpenCode is the pane parser for OpenCode sessions.
+// OpenCode's TUI has distinctive patterns visible in tmux capture-pane:
+//
+//	▣  Build · claude-opus-4.6 · 2m 17s    — working indicator with model + elapsed
+//	✱ Grep "pattern" in pkg/...             — tool execution
+//	→ Read file.go [offset=1, limit=20]     — tool result
+//	~ Preparing write...                    — pending operation
+//	⠏ Sling Ruby analyzer...               — braille spinner with action
+//	■■■■■■⬝⬝  esc interrupt                — bottom status bar (progress dots)
+//	Build  Claude Opus 4.6 GitHub Copilot   — model info line (chrome)
+//	┃ ... ╹▀▀▀                              — box-drawing chrome
+//	40,140  31% ($0.00)                     — context/token info in header
+func parsePaneContentOpenCode(a *AgentLight, lines []string) {
+	a.StatusText = ""
+	a.WaitingForHuman = false
+	a.WaitingReason = ""
+	a.RateLimited = false
+	a.HitLimit = false
+	a.LimitResetInfo = ""
+	a.CurrentTool = "" // Reset each poll
+	// ContextPercent, SessionLimitPct, SessionLimitReset persist (sticky)
+
+	if len(lines) == 0 {
+		return
+	}
+
+	// Scan all lines for status signals.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+
+		// Skip empty lines and pure box-drawing chrome
+		if trimmed == "" || isOpenCodeChromeLine(trimmed) {
+			continue
+		}
+
+		// ── Working indicator: "▣  Build · claude-opus-4.6 · 2m 17s" ──
+		// The ▣ (filled square) at the start of a line indicates active processing.
+		if strings.HasPrefix(trimmed, "▣") {
+			if status := extractOpenCodeWorkingStatus(trimmed); status != "" {
+				a.StatusText = status
+			}
+		}
+
+		// ── Tool execution: "✱ Grep ..." or "→ Read ..." ──
+		// ✱ = tool invocation, → = tool result
+		if strings.HasPrefix(trimmed, "✱") {
+			if tool := extractOpenCodeTool(trimmed); tool != "" {
+				a.CurrentTool = tool
+			}
+		}
+
+		// ── Pending operation: "~ Preparing write..." ──
+		if strings.HasPrefix(trimmed, "~") {
+			rest := strings.TrimSpace(trimmed[1:])
+			if rest != "" {
+				a.StatusText = rest
+			}
+		}
+
+		// ── Braille spinner: already handled by extractStatusLine (shared) ──
+		// e.g., "⠏ Sling Ruby analyzer..." — the shared function catches these
+
+		// ── Context/token info in header line: "40,140  31% ($0.00)" ──
+		// Pattern: "<tokens>  <pct>% (<cost>)" appearing after the # header
+		if pct := extractOpenCodeContextPercent(trimmed); pct > 0 {
+			a.ContextPercent = pct
+		}
+
+		// ── Rate limit / usage limit (universal patterns) ──
+		if strings.Contains(lower, "rate limit") && (strings.Contains(lower, "retry") || strings.Contains(lower, "resets") || strings.Contains(lower, "exceeded")) {
+			a.RateLimited = true
+		}
+		if strings.Contains(lower, "hit your limit") || strings.Contains(lower, "credit balance too low") ||
+			strings.Contains(lower, "quota exceeded") {
+			a.HitLimit = true
+			a.LimitResetInfo = extractLimitResetInfo(line)
+		}
+	}
+
+	// If no tool found from ✱ lines, try braille spinner lines (shared code)
+	if a.CurrentTool == "" && a.StatusText == "" {
+		for i := len(lines) - 1; i >= 0; i-- {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" || isOpenCodeChromeLine(trimmed) {
+				continue
+			}
+			if status := extractStatusLine(trimmed); status != "" {
+				a.StatusText = status
+				break
+			}
+		}
+	}
+
+	// HitLimit overrides stale tool display
+	if a.HitLimit {
+		a.CurrentTool = ""
+	}
+}
+
+// isOpenCodeChromeLine returns true if the line is OpenCode TUI chrome that
+// should be ignored when extracting status. These are always-present UI
+// elements that carry no status information.
+func isOpenCodeChromeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	// Pure box-drawing: lines that are only ┃, ╹, ▀, spaces
+	if isBoxDrawingOnly(trimmed) {
+		return true
+	}
+	// Bottom status bar: "esc interrupt" with optional progress dots
+	if strings.Contains(trimmed, "esc interrupt") {
+		return true
+	}
+	// Bottom bar: "ctrl+t variants  tab agents  ctrl+p commands"
+	if strings.Contains(trimmed, "ctrl+p commands") {
+		return true
+	}
+	// Model info line: "Build  Claude Opus 4.6 GitHub Copilot"
+	if strings.HasPrefix(trimmed, "Build ") && strings.Contains(trimmed, "Copilot") {
+		return true
+	}
+	// Separator lines
+	if isSeparatorLine(trimmed) {
+		return true
+	}
+	return false
+}
+
+// isBoxDrawingOnly returns true if the string contains only box-drawing
+// characters, spaces, and bar characters used in OpenCode's frame.
+func isBoxDrawingOnly(s string) bool {
+	for _, r := range s {
+		switch r {
+		case '┃', '╹', '▀', '│', '┌', '┐', '└', '┘', '─', '━',
+			'═', '║', '╔', '╗', '╚', '╝', ' ', '\t':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// extractOpenCodeWorkingStatus extracts status from OpenCode's working indicator line.
+// Input:  "▣  Build · claude-opus-4.6 · 2m 17s"
+// Output: "Build · claude-opus-4.6 · 2m 17s"
+// Input:  "▣  Build · claude-opus-4.6"
+// Output: "Build · claude-opus-4.6"
+func extractOpenCodeWorkingStatus(line string) string {
+	trimmed := strings.TrimSpace(line)
+	// Skip past the ▣ indicator
+	idx := strings.Index(trimmed, "▣")
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(trimmed[idx+len("▣"):])
+	if rest == "" {
+		return "working"
+	}
+	return truncateStatus(rest)
+}
+
+// extractOpenCodeTool extracts a tool invocation from OpenCode's tool lines.
+// Input:  "✱ Grep \"defaultRetryConfig\" in pkg/determiner (4 matches)"
+// Output: "Grep(defaultRetryConfig)"
+// Input:  "→ Read pkg/determiner/claude.go [offset=115, limit=20]"
+// Output: "" (→ is a result, not a current invocation)
+func extractOpenCodeTool(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "✱") {
+		return ""
+	}
+	rest := strings.TrimSpace(trimmed[len("✱"):])
+	if rest == "" {
+		return ""
+	}
+
+	// Parse "ToolName arg1 arg2..." into "ToolName(arg1 arg2...)" format
+	// to match Claude's display convention
+	parts := strings.SplitN(rest, " ", 2)
+	toolName := parts[0]
+	if len(parts) == 2 {
+		arg := parts[1]
+		// Clean up: remove quotes, truncate long args
+		arg = strings.Trim(arg, "\"'")
+		if len(arg) > 60 {
+			arg = arg[:57] + "..."
+		}
+		return toolName + "(" + arg + ")"
+	}
+	return toolName
+}
+
+// extractOpenCodeContextPercent extracts context usage percent from OpenCode's header.
+// The header line looks like: "# Begin work on hook...  40,140  31% ($0.00)"
+// or just the right-aligned portion: "40,140  31% ($0.00)"
+// We want to extract 31 and compute context remaining (100 - 31 = 69%).
+func extractOpenCodeContextPercent(line string) int {
+	// Look for pattern: digits followed by "% (" — this is the usage percent
+	// e.g., "31% ($0.00)" or "45% ($0.12)"
+	trimmed := strings.TrimSpace(line)
+	for i := 0; i < len(trimmed)-3; i++ {
+		if trimmed[i] >= '0' && trimmed[i] <= '9' && i+1 < len(trimmed) {
+			// Find the end of the number
+			j := i + 1
+			for j < len(trimmed) && trimmed[j] >= '0' && trimmed[j] <= '9' {
+				j++
+			}
+			// Check if followed by "% ("
+			if j+2 < len(trimmed) && trimmed[j] == '%' && trimmed[j+1] == ' ' && trimmed[j+2] == '(' {
+				numStr := trimmed[i:j]
+				var pct int
+				if _, err := fmt.Sscanf(numStr, "%d", &pct); err == nil && pct >= 0 && pct <= 100 {
+					// OpenCode shows usage %, gt top shows remaining %
+					return 100 - pct
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // detectHumanWait checks if a line indicates the agent is waiting for human input.
@@ -1000,6 +1416,50 @@ func extractBeadID(line string) string {
 		}
 	}
 	return ""
+}
+
+// detectAgentType reads GT_AGENT from the tmux session environment.
+// Returns "claude" if GT_AGENT is explicitly set to claude.
+// Returns the value of GT_AGENT if set to something else.
+// Returns "" (unknown) if GT_AGENT is not set — caller should use
+// detectAgentTypeFromPane() on subsequent polls to identify from pane content.
+func detectAgentType(sessionName string) string {
+	cmd := exec.Command("tmux", "show-environment", "-t", sessionName, "GT_AGENT")
+	out, err := cmd.Output()
+	if err != nil {
+		return "" // GT_AGENT not set — unknown, detect from pane content later
+	}
+	// Output format: GT_AGENT=opencode
+	line := strings.TrimSpace(string(out))
+	parts := strings.SplitN(line, "=", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return "" // empty value — unknown
+	}
+	return parts[1]
+}
+
+// detectAgentTypeFromPane identifies the agent type by inspecting pane content.
+// OpenCode has distinctive signatures: "OpenCode" in the bottom status bar,
+// box-drawing chrome (┃, ╹▀), and "esc interrupt" without Claude's ❯ prompt.
+// Returns "opencode" or "claude" (fallback).
+func detectAgentTypeFromPane(lines []string) string {
+	for _, line := range lines {
+		// OpenCode version string in bottom bar: "• OpenCode 1.1.60"
+		if strings.Contains(line, "OpenCode") {
+			return "opencode"
+		}
+		// OpenCode's bottom bar: "ctrl+t variants  tab agents  ctrl+p commands"
+		if strings.Contains(line, "ctrl+p commands") && strings.Contains(line, "tab agents") {
+			return "opencode"
+		}
+	}
+	return "claude" // default fallback
+}
+
+// isClaudeAgent returns true if the agent type represents a Claude Code session.
+// Empty string or "claude" both indicate Claude (the default).
+func isClaudeAgent(agentType string) bool {
+	return agentType == "" || agentType == "claude"
 }
 
 // View renders the TUI.

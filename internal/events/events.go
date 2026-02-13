@@ -55,9 +55,9 @@ const (
 	TypeMassDeath    = "mass_death"    // Multiple sessions died in short window
 
 	// Witness patrol events
-	TypePatrolStarted   = "patrol_started"
-	TypePolecatChecked  = "polecat_checked"
-	TypePolecatNudged   = "polecat_nudged"
+	TypePatrolStarted    = "patrol_started"
+	TypePolecatChecked   = "polecat_checked"
+	TypePolecatNudged    = "polecat_nudged"
 	TypeEscalationSent   = "escalation_sent"
 	TypeEscalationAcked  = "escalation_acked"
 	TypeEscalationClosed = "escalation_closed"
@@ -68,6 +68,11 @@ const (
 	TypeMerged       = "merged"
 	TypeMergeFailed  = "merge_failed"
 	TypeMergeSkipped = "merge_skipped"
+
+	// Agent activity events (emitted by agent plugins for gt top)
+	TypeToolStarted  = "tool_started"  // Agent began executing a tool
+	TypeToolFinished = "tool_finished" // Agent finished executing a tool
+	TypeAgentIdle    = "agent_idle"    // Agent is idle (waiting for prompt)
 )
 
 // EventsFile is the name of the raw events log.
@@ -329,6 +334,29 @@ func SessionPayload(sessionID, role, topic, cwd string) map[string]interface{} {
 	}
 	if cwd != "" {
 		p["cwd"] = cwd
+	}
+	return p
+}
+
+// ToolPayload creates a payload for tool execution events.
+// tool: tool name with args, e.g., "Bash(git status)"
+// session: tmux session name for matching to agent light
+func ToolPayload(tool, session string) map[string]interface{} {
+	p := map[string]interface{}{
+		"tool": tool,
+	}
+	if session != "" {
+		p["session"] = session
+	}
+	return p
+}
+
+// AgentIdlePayload creates a payload for agent idle events.
+// session: tmux session name for matching to agent light
+func AgentIdlePayload(session string) map[string]interface{} {
+	p := map[string]interface{}{}
+	if session != "" {
+		p["session"] = session
 	}
 	return p
 }
