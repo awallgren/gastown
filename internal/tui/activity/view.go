@@ -537,9 +537,10 @@ func (m *Model) renderRigWithPositions(rig string, currentY *int) string {
 	*currentY++
 
 	var lines []string
-	*currentY++ // Border top line
+	*currentY++ // Border top line (╭──...──╮)
 
 	for _, a := range agents {
+		*currentY++
 		a.renderY = *currentY
 		a.renderHeight = 1
 		lines = append(lines, m.renderLight(a))
@@ -601,7 +602,7 @@ func (m *Model) renderRigWithPositions(rig string, currentY *int) string {
 		maxW = 25
 	}
 
-	*currentY += 2 // Border lines
+	*currentY += 1 // Border bottom line
 	return header + "\n" + style.Width(maxW).Render(content)
 }
 
@@ -615,6 +616,9 @@ func (m *Model) renderHoverDetail() string {
 
 	var parts []string
 	parts = append(parts, lipgloss.NewStyle().Bold(true).Render(a.Icon+" "+a.SessionName))
+
+	// DEBUG: show mouse Y vs agent renderY for off-by-one diagnosis
+	parts = append(parts, statusDimStyle.Render(fmt.Sprintf("[mouseY=%d renderY=%d]", m.mouseY, a.renderY)))
 
 	// Show agent type for non-Claude agents (Claude is the default, so showing it is noise)
 	if a.AgentType != "" && a.AgentType != "claude" {
