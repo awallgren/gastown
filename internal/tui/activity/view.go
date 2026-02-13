@@ -616,9 +616,6 @@ func (m *Model) renderHoverDetail() string {
 	var parts []string
 	parts = append(parts, lipgloss.NewStyle().Bold(true).Render(a.Icon+" "+a.SessionName))
 
-	// DEBUG: show mouse Y vs agent renderY for off-by-one diagnosis
-	parts = append(parts, statusDimStyle.Render(fmt.Sprintf("[mouseY=%d renderY=%d]", m.mouseY, a.renderY)))
-
 	// Show agent type for non-Claude agents (Claude is the default, so showing it is noise)
 	if a.AgentType != "" && a.AgentType != "claude" {
 		parts = append(parts, statusDimStyle.Render("agent: "+a.AgentType))
@@ -746,13 +743,7 @@ func formatElapsed(d time.Duration) string {
 
 // renderHelp renders the help bar.
 func (m *Model) renderHelp() string {
-	// DEBUG: show all agent renderY values for drift diagnosis
-	var debugParts []string
-	for _, a := range m.agents {
-		debugParts = append(debugParts, fmt.Sprintf("%s:%d", a.Name, a.renderY))
-	}
-	debug := statusDimStyle.Render(fmt.Sprintf("  [mouseY=%d agents: %s]", m.mouseY, strings.Join(debugParts, " ")))
-	return helpStyle.Render("  q: quit  •  double-click: attach  •  ⚠ = needs human") + "\n" + debug
+	return helpStyle.Render("  q: quit  •  double-click: attach  •  ⚠ = needs human")
 }
 
 // activeFlash returns the current flash message if it's still within its display window (3s).

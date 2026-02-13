@@ -341,9 +341,9 @@ func (m *Model) blinkTick() tea.Cmd {
 	})
 }
 
-// pollTick fires every 3s to re-poll tmux. (DEBUG: slowed from 1s)
+// pollTick fires every 1s to re-poll tmux.
 func (m *Model) pollTick() tea.Cmd {
-	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
 		return pollMsg{}
 	})
 }
@@ -938,12 +938,23 @@ func parsePaneContentClaude(a *AgentLight, lines []string) {
 //	✱ Grep "pattern" in pkg/...             — tool execution in flight (WORKING signal)
 //	→ Read file.go [offset=1, limit=20]     — tool result (completed, not in-flight)
 //	~ Preparing write...                    — pending operation (WORKING signal)
+//	~ Writing command...                    — pending command execution (WORKING signal)
 //	⠏ Sling Ruby analyzer...               — braille spinner with action (WORKING signal)
 //	■■■■■■⬝⬝  esc interrupt                — bottom status bar (filled ■ = progress)
 //	Build  Claude Opus 4.6 GitHub Copilot   — model info line (chrome)
 //	┃ ... ╹▀▀▀                              — box-drawing chrome
 //	40,140  31% ($0.00)                     — context/token info in header
 //	[•] Fix the parser                      — todo item in-progress (sidebar, wide panes only)
+//
+// Tool panel patterns (visible in tmux capture-pane output):
+//
+//	┃  # Description comment                — tool description inside completed panel
+//	┃  $ command args 2>&1                  — command inside completed panel
+//	┃  ✓ Success message                    — output inside completed panel
+//	$ command args 2>&1                     — bare command = actively executing (no ┃ frame)
+//
+// The ┃ (box-drawing vertical) frame wraps completed tool results. Lines with
+// ┃ prefix are historical; bare $ or # lines near the bottom are active.
 func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	a.StatusText = ""
 	a.WaitingForHuman = false
@@ -964,6 +975,11 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	var pendingOp string     // from ~ lines
 	var spinnerStatus string // from braille spinner lines
 	var hasTodoInProgress bool
+
+	// Bash tool panel signals (from ┃-framed panels and bare $ lines)
+	var lastBashDesc string  // last "# description" from a tool panel
+	var lastBashCmd string   // last "$ command" from a tool panel
+	var activeBashCmd string // bare "$ command" NOT inside ┃ frame (= active execution)
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -989,7 +1005,26 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 			}
 		}
 
-		// ── Pending operation: "~ Preparing write..." ──
+		// ── Bash tool panel content (inside ┃ frame = completed result) ──
+		// "┃  # Zombie scan" → description
+		// "┃  $ gt deacon zombie-scan 2>&1" → command
+		if strings.HasPrefix(trimmed, "┃") {
+			inner := strings.TrimSpace(strings.TrimPrefix(trimmed, "┃"))
+			if strings.HasPrefix(inner, "# ") {
+				lastBashDesc = strings.TrimPrefix(inner, "# ")
+			} else if strings.HasPrefix(inner, "$ ") {
+				lastBashCmd = strings.TrimPrefix(inner, "$ ")
+			}
+		}
+
+		// ── Bare "$ command" (no ┃ prefix) — active command execution ──
+		// When OpenCode is currently running a Bash tool, the command line
+		// appears without the ┃ frame (the frame wraps only after completion).
+		if !strings.HasPrefix(trimmed, "┃") && strings.HasPrefix(trimmed, "$ ") {
+			activeBashCmd = strings.TrimPrefix(trimmed, "$ ")
+		}
+
+		// ── Pending operation: "~ Preparing write..." / "~ Writing command..." ──
 		if strings.HasPrefix(trimmed, "~") {
 			rest := strings.TrimSpace(trimmed[1:])
 			if rest != "" {
@@ -1026,25 +1061,52 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	}
 
 	// Priority order for status:
-	// 1. Tool in flight (✱) — most informative
-	// 2. Pending operation (~) — about to do something
-	// 3. Braille spinner — active processing
-	// 4. Elapsed time from ▣ line — shows duration but not what's happening
-	// 5. Todo in-progress — sidebar signal (wide panes only)
-	// 6. Nothing — agent is idle
+	// 1. Tool in flight (✱) — most informative (built-in OpenCode signal)
+	// 2. Active bare "$ command" — Bash tool currently executing
+	// 3. Pending operation (~) — about to do something
+	// 4. Braille spinner — active processing
+	// 5. Completed Bash panel (┃ $ command) — last thing that finished
+	// 6. Elapsed time from ▣ line — shows duration but not what's happening
+	// 7. Todo in-progress — sidebar signal (wide panes only)
+	// 8. Nothing — agent is idle
 
 	if lastToolLine != "" {
 		a.CurrentTool = lastToolLine
 		if elapsedTime != "" {
 			a.StatusText = elapsedTime
 		}
+	} else if activeBashCmd != "" {
+		// Active command execution (bare $ without ┃ frame)
+		a.CurrentTool = formatBashTool(activeBashCmd)
+		if lastBashDesc != "" {
+			a.StatusText = truncateStatus(lastBashDesc)
+		} else if elapsedTime != "" {
+			a.StatusText = elapsedTime
+		}
 	} else if pendingOp != "" {
 		a.StatusText = pendingOp
+		// If we have a recent bash command context, show it as the tool
+		if lastBashCmd != "" {
+			a.CurrentTool = formatBashTool(lastBashCmd)
+		}
 	} else if spinnerStatus != "" {
 		a.StatusText = spinnerStatus
+	} else if lastBashCmd != "" && elapsedTime != "" {
+		// No active signal but we have a completed command and elapsed time —
+		// show the last command for context (agent may be processing its output)
+		a.CurrentTool = formatBashTool(lastBashCmd)
+		if lastBashDesc != "" {
+			a.StatusText = truncateStatus(lastBashDesc)
+		} else {
+			a.StatusText = elapsedTime
+		}
 	} else if elapsedTime != "" {
 		// Elapsed time alone (no tool/spinner) — agent is thinking or between steps
 		a.StatusText = elapsedTime
+		// Show description context if available
+		if lastBashDesc != "" {
+			a.StatusText = truncateStatus(lastBashDesc) + " · " + elapsedTime
+		}
 	} else if hasTodoInProgress {
 		// No active signals but has in-progress todo — likely between operations
 		a.StatusText = ""
@@ -1215,6 +1277,26 @@ func extractOpenCodeTool(line string) string {
 		return toolName + "(" + arg + ")"
 	}
 	return toolName
+}
+
+// formatBashTool formats a raw command line into a compact Bash(cmd) display.
+// Input:  "gt deacon zombie-scan 2>&1"
+// Output: "Bash(gt deacon zombie-scan)"
+// Strips common shell suffixes (2>&1, | head, etc.) for cleaner display.
+func formatBashTool(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	// Strip common shell redirections for cleaner display
+	for _, suffix := range []string{" 2>&1", " 2>/dev/null", " > /dev/null"} {
+		cmd = strings.TrimSuffix(cmd, suffix)
+	}
+	cmd = strings.TrimSpace(cmd)
+	if len(cmd) > 60 {
+		cmd = cmd[:57] + "..."
+	}
+	return "Bash(" + cmd + ")"
 }
 
 // extractOpenCodeContextPercent extracts context usage percent from OpenCode's header.
