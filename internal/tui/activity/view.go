@@ -147,8 +147,13 @@ func (m *Model) render() string {
 		return ""
 	}
 
-	// Reset render positions
-	currentY := 2 // Start after header
+	// Reset render positions.
+	// The outer DoubleBorder top line is at screen Y=0, but the border
+	// is rendered AFTER content is assembled — it wraps the content.
+	// Mouse Y=0 corresponds to the border top. The header (first content
+	// line) is at Y=1. After the header we're at Y=1 (header occupies
+	// Y=1 only). Rig content follows immediately.
+	currentY := 1 // after outer border top + header
 
 	var sections []string
 
@@ -174,6 +179,8 @@ func (m *Model) render() string {
 	// Help or hover detail (replaces help line when hovering)
 	if m.hoveredAgent != nil {
 		sections = append(sections, m.renderHoverDetail())
+	} else if flash := m.activeFlash(); flash != "" {
+		sections = append(sections, m.renderFlash(flash))
 	} else {
 		sections = append(sections, m.renderHelp())
 	}
@@ -736,5 +743,23 @@ func formatElapsed(d time.Duration) string {
 
 // renderHelp renders the help bar.
 func (m *Model) renderHelp() string {
-	return helpStyle.Render("  q: quit  •  hover for details  •  ⚠ = needs human input")
+	return helpStyle.Render("  q: quit  •  hover for details  •  double-click: attach  •  ⚠ = needs human input")
+}
+
+// activeFlash returns the current flash message if it's still within its display window (3s).
+func (m *Model) activeFlash() string {
+	if m.flashMessage == "" {
+		return ""
+	}
+	if time.Since(m.flashTime) > 3*time.Second {
+		m.flashMessage = ""
+		return ""
+	}
+	return m.flashMessage
+}
+
+// renderFlash renders a flash status message in the help bar area.
+func (m *Model) renderFlash(msg string) string {
+	style := lipgloss.NewStyle().Foreground(colorActive).Bold(true)
+	return "  " + style.Render(msg)
 }

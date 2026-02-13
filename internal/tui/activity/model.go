@@ -86,6 +86,14 @@ type Model struct {
 	mouseX       int
 	mouseY       int
 
+	// Double-click detection (bubbletea has no native double-click)
+	lastClickAgent *AgentLight // agent that was last left-clicked
+	lastClickTime  time.Time   // when the last left-click occurred
+
+	// Status flash message (e.g., "Opened terminal for gt-foo-crew-bar")
+	flashMessage string    // message to display briefly
+	flashTime    time.Time // when the flash was set
+
 	// Plugin event consumption (for non-Claude agents like OpenCode)
 	townRoot         string      // cached town root for reading events file
 	recentToolEvents []toolEvent // recent tool_started events (< 15s old)
@@ -353,6 +361,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mouseX = msg.X
 		m.mouseY = msg.Y
 		m.updateHoveredAgent()
+
+		// Double-click detection: two left-button presses on the same agent within 500ms.
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			clickedAgent := m.agentAtY(msg.Y)
+			if clickedAgent != nil && clickedAgent == m.lastClickAgent &&
+				time.Since(m.lastClickTime) < 500*time.Millisecond {
+				// Double-click detected — launch terminal attached to this session
+				m.lastClickAgent = nil // reset to avoid triple-click
+				m.openTerminalWithTmuxAttach(clickedAgent.SessionName)
+			} else {
+				m.lastClickAgent = clickedAgent
+				m.lastClickTime = time.Now()
+			}
+		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1451,6 +1473,65 @@ func (m *Model) updateHoveredAgent() {
 			break
 		}
 	}
+}
+
+// agentAtY returns the agent at the given Y coordinate, or nil.
+func (m *Model) agentAtY(y int) *AgentLight {
+	for _, a := range m.agents {
+		if a.renderY > 0 && y >= a.renderY && y < a.renderY+a.renderHeight {
+			return a
+		}
+	}
+	return nil
+}
+
+// openTerminalWithTmuxAttach launches a new terminal window/tab running
+// "tmux attach -t <session>". On macOS, it tries iTerm2 first (AppleScript),
+// then falls back to Terminal.app. The command is run in the background so
+// it doesn't block the TUI.
+func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		m.flashMessage = "tmux not found"
+		m.flashTime = time.Now()
+		return
+	}
+
+	attachCmd := fmt.Sprintf("%s attach -t %s", tmuxPath, sessionName)
+
+	// Try iTerm2 first (very common on macOS for dev)
+	iterm := exec.Command("osascript", "-e", fmt.Sprintf(
+		`tell application "iTerm2"
+			create window with default profile command "%s"
+		end tell`, attachCmd))
+	if err := iterm.Start(); err == nil {
+		m.flashMessage = "Opened iTerm2 → " + sessionName
+		m.flashTime = time.Now()
+		return
+	}
+
+	// Fallback: macOS Terminal.app
+	terminal := exec.Command("osascript", "-e", fmt.Sprintf(
+		`tell application "Terminal"
+			do script "%s"
+			activate
+		end tell`, attachCmd))
+	if err := terminal.Start(); err == nil {
+		m.flashMessage = "Opened Terminal → " + sessionName
+		m.flashTime = time.Now()
+		return
+	}
+
+	// Last resort: try generic x-terminal-emulator (Linux)
+	generic := exec.Command("x-terminal-emulator", "-e", attachCmd)
+	if err := generic.Start(); err == nil {
+		m.flashMessage = "Opened terminal → " + sessionName
+		m.flashTime = time.Now()
+		return
+	}
+
+	m.flashMessage = "Could not open terminal"
+	m.flashTime = time.Now()
 }
 
 // fetchAgentDetails fetches additional info for hover tooltip.
