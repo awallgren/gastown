@@ -1108,28 +1108,41 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	// 3. Active bare "$ command" — Bash tool currently executing
 	// 4. Pending operation (~) — about to do something
 	// 5. Braille spinner — active processing (e.g., "Explore Task")
-	// 6. Completed panel sub-tool or command — last thing that finished
-	// 7. Elapsed time from ▣ line — shows duration but not what's happening
-	// 8. Nothing — agent is idle
+	// 6. Elapsed time from ▣ line — shows duration but not what's happening
+	// 7. Nothing — agent is idle
+	//
+	// Note: completed panel content (lastPanelDesc, lastSubTool, lastBashCmd)
+	// is only used as supplemental context when active signals (1-5) are
+	// present. When only elapsed time is available, we don't surface stale
+	// completed-panel descriptions — they'd misleadingly suggest the agent
+	// is still working on a finished task.
 
-	// Helper: best available task description for status text
-	bestDesc := activeTaskDesc
-	if bestDesc == "" {
-		bestDesc = lastPanelDesc
+	// Helper: best available task description for status text.
+	// activeDesc comes from non-┃ panels (active work), completedDesc from
+	// ┃-framed panels (finished work). We only surface completedDesc when
+	// there's an active signal (spinner, tool, etc.) to avoid showing stale
+	// descriptions from long-finished tasks.
+	activeDesc := activeTaskDesc
+	completedDesc := lastPanelDesc
+
+	// bestDesc: prefer active, fall back to completed only for active-signal branches
+	bestDescForActive := activeDesc
+	if bestDescForActive == "" {
+		bestDescForActive = completedDesc
 	}
 
 	if lastToolLine != "" {
 		a.CurrentTool = lastToolLine
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
+		if bestDescForActive != "" {
+			a.StatusText = truncateStatus(bestDescForActive)
 		} else if elapsedTime != "" {
 			a.StatusText = elapsedTime
 		}
 	} else if activeSubTool != "" {
 		// Active sub-tool from a Task panel (e.g., "└ Read file.go")
 		a.CurrentTool = formatSubTool(activeSubTool)
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
+		if bestDescForActive != "" {
+			a.StatusText = truncateStatus(bestDescForActive)
 		} else if activeToolName != "" {
 			a.StatusText = activeToolName
 		} else if elapsedTime != "" {
@@ -1137,8 +1150,8 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 	} else if activeBashCmd != "" {
 		a.CurrentTool = formatBashTool(activeBashCmd)
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
+		if bestDescForActive != "" {
+			a.StatusText = truncateStatus(bestDescForActive)
 		} else if elapsedTime != "" {
 			a.StatusText = elapsedTime
 		}
@@ -1153,28 +1166,18 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		if lastSubTool != "" {
 			a.CurrentTool = formatSubTool(lastSubTool)
 		}
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
-		}
-	} else if lastSubTool != "" && elapsedTime != "" {
-		// Completed panel with sub-tool — show for context
-		a.CurrentTool = formatSubTool(lastSubTool)
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
-		} else {
-			a.StatusText = elapsedTime
-		}
-	} else if lastBashCmd != "" && elapsedTime != "" {
-		a.CurrentTool = formatBashTool(lastBashCmd)
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc)
-		} else {
-			a.StatusText = elapsedTime
+		if bestDescForActive != "" {
+			a.StatusText = truncateStatus(bestDescForActive)
 		}
 	} else if elapsedTime != "" {
-		a.StatusText = elapsedTime
-		if bestDesc != "" {
-			a.StatusText = truncateStatus(bestDesc) + " · " + elapsedTime
+		// No active signals — only completed panels + elapsed time.
+		// Show elapsed time; only add active task descriptions (not stale
+		// completed-panel descriptions which look like the agent is still
+		// working on something it finished long ago).
+		if activeDesc != "" {
+			a.StatusText = truncateStatus(activeDesc) + " · " + elapsedTime
+		} else {
+			a.StatusText = elapsedTime
 		}
 	} else if hasTodoInProgress {
 		a.StatusText = ""
