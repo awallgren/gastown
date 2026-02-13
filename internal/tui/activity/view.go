@@ -374,35 +374,42 @@ func (m *Model) renderLight(a *AgentLight) string {
 		}
 	}
 
-	// Append session limit warning if known (more urgent than context)
-	if a.SessionLimitPct > 0 {
-		limitStr := renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
-		statusStr += " " + limitStr
-	}
-
-	// Append context indicator if known and low
-	if a.ContextPercent > 0 {
-		ctxBar := renderContextIndicator(a.ContextPercent)
-		statusStr += " " + ctxBar
-	}
-
 	// Elapsed time
 	elapsedStr := formatElapsed(elapsed)
 	showElapsed := !strings.Contains(statusStr, "·") // skip when status has timing
 
-	// Calculate available width for status text based on terminal size.
-	// Layout: [border 8] icon(3) name(11) bar(4) gap(2) status(...) gap(2) elapsed(~8)
-	fixedWidth := 20 // icon + name + bar + gap before status
+	// Build styled indicators separately (ANSI codes break rune-based truncation)
+	var indicators []string // styled strings appended AFTER truncation
+	var indicatorsWidth int // visual width of all indicators
+
+	if a.SessionLimitPct > 0 {
+		ind := renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
+		indicators = append(indicators, ind)
+		indicatorsWidth += 1 + lipgloss.Width(ind) // " " + indicator
+	}
+	if a.ContextPercent > 0 {
+		ind := renderContextIndicator(a.ContextPercent)
+		indicators = append(indicators, ind)
+		indicatorsWidth += 1 + lipgloss.Width(ind)
+	}
+
+	// Measure actual visual width of the fixed prefix (handles emoji + ANSI correctly)
+	prefix := a.Icon + " " + nameStyle.Render(displayName) + " " + bar + "  "
+	prefixWidth := lipgloss.Width(prefix)
+
 	elapsedWidth := 0
 	if showElapsed {
-		elapsedWidth = len(elapsedStr) + 2 // gap + elapsed text
+		elapsedWidth = lipgloss.Width(elapsedStr) + 2 // gap + elapsed text
 	}
-	availableForStatus := m.width - 8 - fixedWidth - elapsedWidth
+
+	// Content width inside rig panel: outer border(4) + rig border(4) + safety(2)
+	contentWidth := m.width - 10
+	availableForStatus := contentWidth - prefixWidth - elapsedWidth - indicatorsWidth
 	if availableForStatus < 10 {
 		availableForStatus = 10
 	}
 
-	// Truncate status to fit available space
+	// Truncate status to fit (statusStr is plain text here, no ANSI)
 	statusRunes := []rune(statusStr)
 	if len(statusRunes) > availableForStatus {
 		statusStr = string(statusRunes[:availableForStatus-3]) + "..."
@@ -412,6 +419,9 @@ func (m *Model) renderLight(a *AgentLight) string {
 	line := a.Icon + " " + nameStyle.Render(displayName) + " " + bar
 	if statusStr != "" {
 		line += "  " + stStyle.Render(statusStr)
+	}
+	for _, ind := range indicators {
+		line += " " + ind
 	}
 	if showElapsed {
 		line += "  " + statusDimStyle.Render(elapsedStr)
