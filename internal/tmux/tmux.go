@@ -34,6 +34,14 @@ var sessionNudgeLocks sync.Map // map[string]chan struct{}
 // blocking all future nudges to that session.
 const nudgeLockTimeout = 30 * time.Second
 
+// Default window dimensions for new agent sessions.
+// 192x60 gives coding agents (especially OpenCode) comfortable room for
+// side panels, tool output, and wide diffs without excessive wrapping.
+const (
+	defaultWindowCols = "192"
+	defaultWindowRows = "60"
+)
+
 // validSessionNameRe validates session names to prevent shell injection
 var validSessionNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -219,7 +227,7 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-s", name, "-x", defaultWindowCols, "-y", defaultWindowRows}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
@@ -259,7 +267,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	// Two-step creation: create session with default shell first, configure
 	// remain-on-exit, then replace the shell with the actual command. This
 	// eliminates the race between command exit and health check setup.
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-s", name, "-x", defaultWindowCols, "-y", defaultWindowRows}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
@@ -314,7 +322,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 
 	// Two-step creation: create session with env vars and default shell, then
 	// replace the shell with the actual command after configuring remain-on-exit.
-	args := []string{"new-session", "-d", "-s", name}
+	args := []string{"new-session", "-d", "-s", name, "-x", defaultWindowCols, "-y", defaultWindowRows}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
