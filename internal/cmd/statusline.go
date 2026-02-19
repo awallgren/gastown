@@ -616,24 +616,79 @@ func runRefineryStatusLine(t *tmux.Tmux, rigName string) error {
 	return nil
 }
 
-// isSessionWorking detects if a Claude Code session is actively working.
-// Returns true if the ✻ symbol is visible in the pane (indicates Claude is processing).
-// Returns false for idle sessions (showing ❯ prompt) or if state cannot be determined.
+// isSessionWorking detects if an agent session is actively working.
+// For Claude Code: returns true if the ✻ symbol is visible in the pane.
+// For OpenCode: returns true if the ▣ working indicator is visible in the pane.
+// Falls back to checking recent tool events in the events JSONL file.
+// Returns false for idle sessions or if state cannot be determined.
 func isSessionWorking(t *tmux.Tmux, session string) bool {
-	// Capture last few lines of the pane
-	lines, err := t.CapturePaneLines(session, 5)
+	// Capture pane lines (used for both detection and status checking)
+	lines, err := t.CapturePaneLines(session, 10)
 	if err != nil || len(lines) == 0 {
 		return false
 	}
 
-	// Check all captured lines for the working indicator
-	// ✻ appears in Claude's status line when actively processing
+	// Detect agent type: check GT_AGENT env first, then sniff pane content
+	agentType, _ := t.GetEnvironment(session, "GT_AGENT")
+	if agentType == "" {
+		agentType = detectAgentTypeFromPaneStatusline(lines)
+	}
+
+	switch agentType {
+	case "opencode":
+		return isSessionWorkingOpenCode(lines)
+	default:
+		return isSessionWorkingClaude(lines)
+	}
+}
+
+// detectAgentTypeFromPaneStatusline identifies the agent type from pane content.
+// Used by the statusline command (one-shot, not the TUI).
+func detectAgentTypeFromPaneStatusline(lines []string) string {
+	for _, line := range lines {
+		if strings.Contains(line, "OpenCode") {
+			return "opencode"
+		}
+		if strings.Contains(line, "ctrl+p commands") && strings.Contains(line, "tab agents") {
+			return "opencode"
+		}
+	}
+	return "claude"
+}
+
+// isSessionWorkingClaude detects working state for Claude Code via the ✻ pane indicator.
+func isSessionWorkingClaude(lines []string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, "✻") {
 			return true
 		}
 	}
+	return false
+}
 
+// isSessionWorkingOpenCode detects working state for OpenCode.
+// The ▣ line is ALWAYS present (static chrome) and is NOT a working signal.
+// Real working signals are: ✱ (tool in flight), braille spinners, ~ (pending ops).
+func isSessionWorkingOpenCode(lines []string) bool {
+	brailleSpinners := "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷"
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// ✱ = tool execution in progress
+		if strings.HasPrefix(trimmed, "✱") {
+			return true
+		}
+		// ~ = preparing an operation (e.g., "~ Preparing write...")
+		if strings.HasPrefix(trimmed, "~") && len(trimmed) > 2 {
+			return true
+		}
+		// Braille spinner = active processing (e.g., "⠏ Analyzing...")
+		if len(trimmed) > 0 {
+			firstRune := []rune(trimmed)[0]
+			if strings.ContainsRune(brailleSpinners, firstRune) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
