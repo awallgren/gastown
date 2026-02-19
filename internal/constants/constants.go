@@ -253,6 +253,9 @@ const (
 
 	// RoleDeacon is the deacon agent role.
 	RoleDeacon = "deacon"
+
+	// RoleDog is the dog agent role (town-level workers dispatched by Deacon).
+	RoleDog = "dog"
 )
 
 // Role emojis - centralized for easy customization.
@@ -275,6 +278,9 @@ const (
 
 	// EmojiPolecat is the polecat emoji (transient worker).
 	EmojiPolecat = "😺"
+
+	// EmojiDog is the dog emoji (Deacon's town-level worker).
+	EmojiDog = "🐕"
 )
 
 // Molecule formula names for patrol and dog workflows.
@@ -335,6 +341,8 @@ func RoleEmoji(role string) string {
 		return EmojiCrew
 	case RolePolecat:
 		return EmojiPolecat
+	case RoleDog:
+		return EmojiDog
 	default:
 		return "❓"
 	}
