@@ -32,38 +32,73 @@ func TestEnsurePluginAt_EmptyParameters(t *testing.T) {
 }
 
 func TestEnsurePluginAt_FileExists(t *testing.T) {
-	// Create a temporary directory
-	tmpDir := t.TempDir()
+	t.Run("overwrites stale content", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		pluginDir := "plugins"
+		pluginFile := "gastown.js"
+		pluginPath := filepath.Join(tmpDir, pluginDir, pluginFile)
 
-	// Create the plugin file first
-	pluginDir := "plugins"
-	pluginFile := "gastown.js"
-	pluginPath := filepath.Join(tmpDir, pluginDir, pluginFile)
+		if err := os.MkdirAll(filepath.Dir(pluginPath), 0755); err != nil {
+			t.Fatalf("Failed to create test directory: %v", err)
+		}
 
-	if err := os.MkdirAll(filepath.Dir(pluginPath), 0755); err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
+		// Write stale content that differs from the embedded version
+		staleContent := []byte("// old plugin version")
+		if err := os.WriteFile(pluginPath, staleContent, 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
 
-	// Write a placeholder file
-	existingContent := []byte("// existing plugin")
-	if err := os.WriteFile(pluginPath, existingContent, 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
+		err := EnsurePluginAt(tmpDir, pluginDir, pluginFile)
+		if err != nil {
+			t.Fatalf("EnsurePluginAt() error = %v", err)
+		}
 
-	// EnsurePluginAt should not overwrite existing file
-	err := EnsurePluginAt(tmpDir, pluginDir, pluginFile)
-	if err != nil {
-		t.Fatalf("EnsurePluginAt() error = %v", err)
-	}
+		// File should have been overwritten with the embedded version
+		content, err := os.ReadFile(pluginPath)
+		if err != nil {
+			t.Fatalf("Failed to read plugin file: %v", err)
+		}
+		if string(content) == string(staleContent) {
+			t.Error("EnsurePluginAt() should overwrite stale file with embedded version")
+		}
+		if len(content) == 0 {
+			t.Error("Plugin file should have content after sync")
+		}
+	})
 
-	// Verify file content is unchanged
-	content, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("Failed to read plugin file: %v", err)
-	}
-	if string(content) != string(existingContent) {
-		t.Error("EnsurePluginAt() should not overwrite existing file")
-	}
+	t.Run("skips write when content matches", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		pluginDir := "plugins"
+		pluginFile := "gastown.js"
+		pluginPath := filepath.Join(tmpDir, pluginDir, pluginFile)
+
+		// First call creates the file with embedded content
+		err := EnsurePluginAt(tmpDir, pluginDir, pluginFile)
+		if err != nil {
+			t.Fatalf("EnsurePluginAt() first call error = %v", err)
+		}
+
+		// Record the mod time
+		info1, err := os.Stat(pluginPath)
+		if err != nil {
+			t.Fatalf("Failed to stat plugin file: %v", err)
+		}
+
+		// Second call should be a no-op (content matches)
+		err = EnsurePluginAt(tmpDir, pluginDir, pluginFile)
+		if err != nil {
+			t.Fatalf("EnsurePluginAt() second call error = %v", err)
+		}
+
+		info2, err := os.Stat(pluginPath)
+		if err != nil {
+			t.Fatalf("Failed to stat plugin file: %v", err)
+		}
+
+		if info2.ModTime() != info1.ModTime() {
+			t.Error("EnsurePluginAt() should not rewrite file when content matches")
+		}
+	})
 }
 
 func TestEnsurePluginAt_CreatesFile(t *testing.T) {
