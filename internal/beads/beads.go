@@ -684,6 +684,9 @@ func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
 	if opts.NoAssignee {
 		args = append(args, "--no-assignee")
 	}
+	if opts.Ephemeral {
+		args = append(args, "--include-infra")
+	}
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))
 	} else {

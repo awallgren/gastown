@@ -260,86 +260,135 @@ func (m *Model) renderLight(a *AgentLight) string {
 	var statusStr string
 	var stStyle lipgloss.Style
 
-	// Current tool execution takes priority (most specific/useful info)
-	if a.CurrentTool != "" {
+	// Build work bead context — this is the primary info for the agent line.
+	// Shows bead ID, title, and molecule step progress when available.
+	var beadCtx string
+	if a.WorkBeadID != "" {
+		beadCtx = a.WorkBeadID
+		if a.WorkBeadTitle != "" {
+			beadCtx += ": " + a.WorkBeadTitle
+		}
+		if a.StepsTotal > 0 {
+			beadCtx += fmt.Sprintf(" [%d/%d]", a.StepsDone, a.StepsTotal)
+			if a.StepCurrent != "" {
+				beadCtx += " " + a.StepCurrent
+			}
+		}
+	}
+
+	// Priority order:
+	//   1. Warning states (HIT LIMIT, NEEDS HUMAN) — always override
+	//   2. Bead context as primary content (tool appended if active)
+	//   3. Active tool alone (no bead info available)
+	//   4. Fallback to StatusText or level-based defaults
+	switch {
+	case a.Level == LevelHitLimit:
+		statusStr = "⚠ HIT LIMIT"
+		if a.LimitResetInfo != "" {
+			statusStr += " · " + a.LimitResetInfo
+		}
+		stStyle = statRateLimitedStyle
+	case a.Level == LevelWaitingForHuman:
+		statusStr = "⚠ NEEDS HUMAN"
+		if a.WaitingReason != "" {
+			statusStr += " · " + a.WaitingReason
+		}
+		stStyle = statusWaitingStyle
+	case beadCtx != "":
+		switch a.Level {
+		case LevelCold:
+			statusStr = "stalled · " + beadCtx
+			stStyle = lipgloss.NewStyle().Foreground(colorCold)
+		case LevelRateLimited:
+			statusStr = "rate limited · " + beadCtx
+			stStyle = lipgloss.NewStyle().Foreground(colorRateLimited)
+		default:
+			statusStr = beadCtx
+			if a.CurrentTool != "" {
+				statusStr += " · ⏺ " + a.CurrentTool
+			}
+			stStyle = statusDimStyle
+		}
+	case a.CurrentTool != "":
 		statusStr = "⏺ " + a.CurrentTool
 		stStyle = statusDimStyle
-	} else {
-		// Fall back to level-based status
+	default:
+		// No bead info — fall back to patrol status, then level/status text
 		switch a.Level {
-		case LevelActive:
-			statusStr = a.StatusText
-			stStyle = statusDimStyle
-		case LevelRecent:
-			statusStr = a.StatusText
+		case LevelActive, LevelRecent:
+			if a.StatusText != "" {
+				statusStr = a.StatusText
+			} else if a.LastPatrol != "" {
+				statusStr = a.LastPatrol
+			}
 			stStyle = statusDimStyle
 		case LevelWarm, LevelCool:
 			if a.StatusText != "" {
 				statusStr = a.StatusText
+			} else if a.LastPatrol != "" {
+				statusStr = a.LastPatrol
 			} else {
 				statusStr = "idle"
 			}
 			stStyle = statusDimStyle
 		case LevelCold:
-			statusStr = "stalled"
+			if a.LastPatrol != "" {
+				statusStr = "stalled · " + a.LastPatrol
+			} else {
+				statusStr = "stalled"
+			}
 			stStyle = lipgloss.NewStyle().Foreground(colorCold)
 		case LevelRateLimited:
-			statusStr = "rate limited"
+			if a.LastPatrol != "" {
+				statusStr = "rate limited · " + a.LastPatrol
+			} else {
+				statusStr = "rate limited"
+			}
 			stStyle = lipgloss.NewStyle().Foreground(colorRateLimited)
-		case LevelHitLimit:
-			statusStr = "⚠ HIT LIMIT"
-			if a.LimitResetInfo != "" {
-				statusStr += " · " + a.LimitResetInfo
-			}
-			stStyle = statRateLimitedStyle
-		case LevelWaitingForHuman:
-			statusStr = "⚠ NEEDS HUMAN"
-			if a.WaitingReason != "" {
-				statusStr += " · " + a.WaitingReason
-			}
-			stStyle = statusWaitingStyle
 		}
 	}
 
-	// Elapsed time
+	// Elapsed time — shown right-justified alongside context/compaction info
 	elapsedStr := formatElapsed(elapsed)
-	showElapsed := !strings.Contains(statusStr, "·") // skip when status has timing
+	showElapsed := elapsedStr != ""
 
-	// Right-justified indicators (context %, session limit) go at the far right
-	// of the line. Left side has: icon name bar status elapsed.
-	// If the status text is long, the context indicator shrinks from
-	// "xx% used" to just "xx%".
+	// Right-justified indicators: elapsed, session limit %, context %.
+	// Build both full and compact versions to measure exact widths,
+	// then use the measurement to constrain the status text.
 
-	// Collect right-side indicators
-	var rightParts []string   // styled strings for right side
-	var rightFullWidth int    // visual width with full labels
-	var rightCompactWidth int // visual width with compact labels
-
-	if a.SessionLimitPct > 0 {
-		ind := renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
-		rightParts = append(rightParts, ind)
-		w := lipgloss.Width(ind)
-		rightFullWidth += w
-		rightCompactWidth += w // session limit doesn't have a compact form
+	// Build right-side string (full version first)
+	buildRightSide := func(compact bool) string {
+		var rs string
+		if showElapsed {
+			rs += statusDimStyle.Render(elapsedStr)
+		}
+		if a.SessionLimitPct > 0 {
+			if rs != "" {
+				rs += "  "
+			}
+			rs += renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
+		}
+		if a.ContextPercent > 0 {
+			if rs != "" {
+				rs += " "
+			}
+			rs += renderContextIndicator(a.ContextPercent, compact, a.TokenCount, a.SessionCreated)
+		}
+		return rs
 	}
-	if a.ContextPercent > 0 {
-		rightFullWidth += lipgloss.Width(renderContextIndicator(a.ContextPercent, false, a.TokenCount, a.SessionCreated))
-		rightCompactWidth += lipgloss.Width(renderContextIndicator(a.ContextPercent, true, a.TokenCount, a.SessionCreated))
-	}
-	if len(rightParts) > 0 || a.ContextPercent > 0 {
-		// Account for spacing between right-side items and 1-space separator
-		rightFullWidth += 1 // at least 1 space gap from left content
-		rightCompactWidth += 1
+
+	rightFull := buildRightSide(false)
+	rightCompact := buildRightSide(true)
+	rightFullWidth := lipgloss.Width(rightFull)
+	rightCompactWidth := lipgloss.Width(rightCompact)
+	if rightFullWidth > 0 {
+		rightFullWidth += 3 // minimum 3-space gap from left content
+		rightCompactWidth += 3
 	}
 
 	// Measure actual visual width of the fixed prefix (handles emoji + ANSI correctly)
 	prefix := a.Icon + " " + nameStyle.Render(displayName) + " " + bar + "  "
 	prefixWidth := lipgloss.Width(prefix)
-
-	elapsedWidth := 0
-	if showElapsed {
-		elapsedWidth = lipgloss.Width(elapsedStr) + 2 // gap + elapsed text
-	}
 
 	// Content width inside rig panel: rig border(4) + outer padding(2) + safety(2)
 	contentWidth := m.width - 8
@@ -350,24 +399,42 @@ func (m *Model) renderLight(a *AgentLight) string {
 
 	// See if we need compact mode for right indicators
 	useCompact := false
-	availableForStatus := leftBudget - elapsedWidth
+	availableForStatus := leftBudget
 	if availableForStatus < 10 {
 		// Try with compact indicators
 		leftBudget = contentWidth - prefixWidth - rightCompactWidth
 		if leftBudget < 10 {
 			leftBudget = 10
 		}
-		availableForStatus = leftBudget - elapsedWidth
+		availableForStatus = leftBudget
 		if availableForStatus < 10 {
 			availableForStatus = 10
 		}
 		useCompact = true
 	}
 
-	// Truncate status to fit (statusStr is plain text here, no ANSI)
-	statusRunes := []rune(statusStr)
-	if len(statusRunes) > availableForStatus {
-		statusStr = string(statusRunes[:availableForStatus-3]) + "..."
+	// Truncate status to fit available visual width.
+	// Uses lipgloss.Width (visual columns) not rune count, because some
+	// characters (em-dash, CJK, emoji) take 2 columns per rune.
+	if lipgloss.Width(statusStr) > availableForStatus {
+		statusRunes := []rune(statusStr)
+		cut := len(statusRunes)
+		for cut > 0 && lipgloss.Width(string(statusRunes[:cut])+"...") > availableForStatus {
+			cut--
+		}
+		if cut < len(statusRunes) {
+			// Strip trailing punctuation so "passed...." doesn't happen
+			truncated := statusRunes[:cut]
+			for len(truncated) > 0 {
+				last := truncated[len(truncated)-1]
+				if last == '.' || last == ',' || last == ' ' || last == '·' {
+					truncated = truncated[:len(truncated)-1]
+				} else {
+					break
+				}
+			}
+			statusStr = string(truncated) + "..."
+		}
 	}
 
 	// Build the left side of the line
@@ -375,28 +442,19 @@ func (m *Model) renderLight(a *AgentLight) string {
 	if statusStr != "" {
 		line += "  " + stStyle.Render(statusStr)
 	}
-	if showElapsed {
-		line += "  " + statusDimStyle.Render(elapsedStr)
-	}
 	leftWidth := lipgloss.Width(line)
 
-	// Build right-justified indicators
-	var rightSide string
-	if a.SessionLimitPct > 0 {
-		rightSide += renderSessionLimitIndicator(a.SessionLimitPct, a.SessionLimitReset)
-	}
-	if a.ContextPercent > 0 {
-		if rightSide != "" {
-			rightSide += " "
-		}
-		rightSide += renderContextIndicator(a.ContextPercent, useCompact, a.TokenCount, a.SessionCreated)
+	// Append right-justified indicators with gap fill
+	rightSide := rightFull
+	if useCompact {
+		rightSide = rightCompact
 	}
 
 	if rightSide != "" {
 		rightWidth := lipgloss.Width(rightSide)
 		gap := contentWidth - leftWidth - rightWidth
-		if gap < 1 {
-			gap = 1
+		if gap < 3 {
+			gap = 3
 		}
 		line += strings.Repeat(" ", gap) + rightSide
 	}
@@ -586,8 +644,20 @@ func (m *Model) renderHoverDetail() string {
 		parts = append(parts, statusDimStyle.Render("agent: "+a.AgentType))
 	}
 
-	if a.CurrentBead != "" {
-		parts = append(parts, "bead: "+a.CurrentBead)
+	// Work assignment from beads DB
+	if a.WorkBeadID != "" {
+		workInfo := a.WorkBeadID
+		if a.WorkBeadTitle != "" {
+			workInfo += ": " + a.WorkBeadTitle
+		}
+		if a.StepsTotal > 0 {
+			stepInfo := fmt.Sprintf(" [%d/%d]", a.StepsDone, a.StepsTotal)
+			if a.StepCurrent != "" {
+				stepInfo += " " + a.StepCurrent
+			}
+			workInfo += stepInfo
+		}
+		parts = append(parts, workInfo)
 	}
 
 	// Session limit reset time — the % is on the agent line, but reset info is only here
@@ -690,8 +760,12 @@ func renderSessionLimitIndicator(pct int, resetInfo string) string {
 
 // formatElapsed formats a duration compactly for inline display.
 func formatElapsed(d time.Duration) string {
+	if d < 10*time.Second {
+		return ""
+	}
 	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
+		secs := int(d.Seconds())
+		return fmt.Sprintf("%ds", secs)
 	}
 	if d < time.Hour {
 		m := int(d.Minutes())
