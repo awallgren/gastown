@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ var (
 	activityIssue     string
 	activityTo        string
 	activityCount     int
+	activityInterval  float64 // poll interval in seconds for gt top
 )
 
 var activityCmd = &cobra.Command{
@@ -52,8 +54,9 @@ Subcommands:
   emit    Emit an activity event
 
 Examples:
-  gt top         # Launch the monitor
-  gt blink       # Legacy alias`,
+  gt top             # Launch the monitor (3s update interval)
+  gt top -n 1        # Update every second
+  gt blink           # Legacy alias`,
 	RunE: runActivityWatch,
 }
 
@@ -111,6 +114,7 @@ func init() {
 	activityEmitCmd.Flags().StringVar(&activityTo, "to", "", "Escalation target (for escalation_sent: mayor, deacon)")
 	activityEmitCmd.Flags().IntVar(&activityCount, "count", 0, "Polecat count (for patrol events)")
 
+	activityCmd.Flags().Float64VarP(&activityInterval, "interval", "n", 3, "Update interval in seconds")
 	activityCmd.AddCommand(activityEmitCmd)
 	rootCmd.AddCommand(activityCmd)
 }
@@ -240,7 +244,8 @@ func runActivityEmit(cmd *cobra.Command, args []string) error {
 
 // runActivityWatch launches the blinkenlights TUI.
 func runActivityWatch(cmd *cobra.Command, args []string) error {
-	m := activity.NewModel()
+	interval := time.Duration(activityInterval * float64(time.Second))
+	m := activity.NewModel(interval)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("running activity TUI: %w", err)
