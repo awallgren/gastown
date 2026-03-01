@@ -3,10 +3,12 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/doctor"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -133,6 +135,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Ensure GT_DOLT_PORT is set so bd CLI connects to the correct
+	// Dolt server. Without this, bd falls back to dolt-server.port
+	// files in each .beads/ dir which may contain stale port numbers
+	// from previous server instances. This is required for agent bead
+	// creation/queries in the agent-beads-exist check to succeed.
+	if os.Getenv("GT_DOLT_PORT") == "" {
+		doltCfg := doltserver.DefaultConfig(townRoot)
+		os.Setenv("GT_DOLT_PORT", strconv.Itoa(doltCfg.Port))
 	}
 
 	// Create check context
