@@ -15,8 +15,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"strconv"
+
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -64,8 +68,17 @@ type AgentLight struct {
 	SessionLimitPct   int    // session usage percent (0=unknown, sticky)
 	SessionLimitReset string // when the session limit resets (sticky)
 
+	// Work tracking (from beads DB, updated on slower cadence)
+	WorkBeadID    string // assigned/hooked bead ID (e.g., "wp-abc123")
+	WorkBeadTitle string // bead title (e.g., "Fix login bug")
+	FormulaName   string // attached formula name (e.g., "mol-polecat-work"), empty if none
+	StepCurrent   string // current step title (e.g., "branch-setup"), empty if no molecule
+	StepsDone     int    // completed steps in molecule
+	StepsTotal    int    // total steps in molecule
+	AgentState    string // agent lifecycle state from bead (e.g., "working", "idle", "stuck")
+	LastPatrol    string // last patrol summary (sticky — persists until replaced by newer patrol)
+
 	// Hover tooltip info
-	CurrentBead    string    // detected bead ID from pane content
 	RecentOutput   string    // last few lines of output
 	SessionCreated time.Time // when the tmux session was created (for uptime)
 	renderY        int       // Y position in render (for hover detection)
@@ -102,6 +115,14 @@ type Model struct {
 	townRoot string // cached town root for reading events file
 	townName string // display name from town.json (e.g., "My Town")
 
+	// Beads work tracking (slower cadence than tmux polls)
+	lastBeadsPoll time.Time                   // when we last queried beads DB
+	rigBeadsDirs  map[string]string           // rig name -> beads dir path (cached)
+	patrolCache   map[string]patrolCacheEntry // "rig/role" -> cached patrol summary
+
+	// Poll configuration
+	pollInterval time.Duration // how often to poll tmux sessions (default 3s)
+
 	// Plugin event consumption (for non-Claude agents like OpenCode)
 	recentToolEvents []toolEvent // recent tool_started events (< 15s old)
 
@@ -117,7 +138,11 @@ type Model struct {
 }
 
 // NewModel creates a new activity TUI model.
-func NewModel() *Model {
+// pollInterval controls how often tmux sessions are polled; 0 uses the default (3s).
+func NewModel(pollInterval time.Duration) *Model {
+	if pollInterval <= 0 {
+		pollInterval = 3 * time.Second
+	}
 	// Best-effort town root discovery for reading events file.
 	// Try workspace detection from CWD first, then fall back to env vars.
 	// gt top can be run from anywhere (not just inside the town), so the
@@ -135,12 +160,24 @@ func NewModel() *Model {
 		if tc, err := config.LoadTownConfig(constants.MayorTownPath(townRoot)); err == nil {
 			townName = tc.Name
 		}
+
+		// Ensure GT_DOLT_PORT is set so bd CLI connects to the correct
+		// Dolt server. Without this, bd falls back to dolt-server.port
+		// files in each .beads/ dir which may contain stale port numbers
+		// from previous server instances. DefaultConfig reads the
+		// GT_DOLT_PORT env var (or uses the default 3307), matching how
+		// "gt dolt status" discovers the running server.
+		if os.Getenv("GT_DOLT_PORT") == "" {
+			doltCfg := doltserver.DefaultConfig(townRoot)
+			os.Setenv("GT_DOLT_PORT", strconv.Itoa(doltCfg.Port))
+		}
 	}
 
 	return &Model{
-		agents:   make([]*AgentLight, 0),
-		townRoot: townRoot,
-		townName: townName,
+		agents:       make([]*AgentLight, 0),
+		townRoot:     townRoot,
+		townName:     townName,
+		pollInterval: pollInterval,
 	}
 }
 
@@ -303,7 +340,7 @@ func (m *Model) readRecentToolEvents() {
 			EventType: evt.Type,
 		}
 		if evt.Payload != nil {
-			if tool, ok := evt.Payload["tool"].(string); ok {
+			if tool, ok := evt.Payload["tool"].(string); ok && tool != "unknown" {
 				te.Tool = tool
 			}
 			if session, ok := evt.Payload["session"].(string); ok {
@@ -383,7 +420,6 @@ func (m *Model) applyToolEvents() {
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.pollSessions(),
-		m.blinkTick(),
 		tea.SetWindowTitle("GT Activity"),
 		tea.EnableMouseAllMotion, // Enable mouse tracking
 	)
@@ -394,8 +430,7 @@ type (
 	sessionsMsg struct {
 		sessions []sessionInfo
 	}
-	blinkMsg struct{}
-	pollMsg  struct{}
+	pollMsg struct{}
 )
 
 type sessionInfo struct {
@@ -439,12 +474,14 @@ func (m *Model) pollSessions() tea.Cmd {
 			sessions = append(sessions, sessionInfo{name: name, activity: ts, created: created})
 		}
 
-		// Capture pane content for each session (for status extraction)
-		for i := range sessions {
-			paneCmd := exec.Command("tmux", "capture-pane", "-t", sessions[i].name, "-p", "-S", "-10")
-			paneOut, paneErr := paneCmd.Output()
-			if paneErr == nil {
-				sessions[i].paneLines = strings.Split(string(paneOut), "\n")
+		// Capture pane content for all sessions in a single shell invocation.
+		// This replaces N individual tmux capture-pane subprocesses with 1.
+		if len(sessions) > 0 {
+			paneMap := batchCapturePanes(sessions)
+			for i := range sessions {
+				if lines, ok := paneMap[sessions[i].name]; ok {
+					sessions[i].paneLines = lines
+				}
 			}
 		}
 
@@ -452,18 +489,55 @@ func (m *Model) pollSessions() tea.Cmd {
 	}
 }
 
-// blinkTick fires every 300ms for animation.
-func (m *Model) blinkTick() tea.Cmd {
-	return tea.Tick(300*time.Millisecond, func(t time.Time) tea.Msg {
-		return blinkMsg{}
+// pollTick fires on the configured interval to re-poll tmux.
+func (m *Model) pollTick() tea.Cmd {
+	return tea.Tick(m.pollInterval, func(t time.Time) tea.Msg {
+		return pollMsg{}
 	})
 }
 
-// pollTick fires every 1s to re-poll tmux.
-func (m *Model) pollTick() tea.Cmd {
-	return tea.Tick(1*time.Second, func(t time.Time) tea.Msg {
-		return pollMsg{}
-	})
+// batchCapturePanes captures pane content for all sessions in a single shell
+// invocation, replacing N individual tmux capture-pane subprocesses with 1.
+// Returns a map from session name to captured lines.
+func batchCapturePanes(sessions []sessionInfo) map[string][]string {
+	// Build a shell script that captures each pane with a delimiter.
+	// Delimiter format: ===PANE:sessionName===
+	var script strings.Builder
+	for _, s := range sessions {
+		// Session names are safe (alphanumeric + hyphens from our naming convention)
+		fmt.Fprintf(&script, "echo '===PANE:%s==='\n", s.name)
+		fmt.Fprintf(&script, "tmux capture-pane -t '%s' -p -S -10 2>/dev/null\n", s.name)
+	}
+
+	cmd := exec.Command("sh", "-c", script.String())
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	result := make(map[string][]string, len(sessions))
+	lines := strings.Split(string(out), "\n")
+	var currentSession string
+	var currentLines []string
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "===PANE:") && strings.HasSuffix(line, "===") {
+			// Flush previous session
+			if currentSession != "" {
+				result[currentSession] = currentLines
+			}
+			currentSession = line[8 : len(line)-3]
+			currentLines = nil
+		} else if currentSession != "" {
+			currentLines = append(currentLines, line)
+		}
+	}
+	// Flush last session
+	if currentSession != "" {
+		result[currentSession] = currentLines
+	}
+
+	return result
 }
 
 // Update handles messages.
@@ -500,12 +574,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionsMsg:
 		m.updateAgents(msg.sessions)
-		return m, m.pollTick()
-
-	case blinkMsg:
 		m.blinkOn = !m.blinkOn
 		m.tickNum++
-		return m, m.blinkTick()
+		return m, m.pollTick()
 
 	case pollMsg:
 		return m, m.pollSessions()
@@ -653,6 +724,9 @@ func (m *Model) updateAgents(sessions []sessionInfo) {
 	// hooks (tool.execute.before/after), sidestepping pane parsing.
 	m.readRecentToolEvents()
 	m.applyToolEvents()
+
+	// Poll beads DB for work assignments (slower cadence, guarded internally)
+	m.pollBeadsWork()
 
 	// Rebuild rig ordering
 	m.rebuildRigOrder()
@@ -1524,15 +1598,12 @@ func isBoxDrawingOnly(s string) bool {
 	return true
 }
 
-// extractOpenCodeElapsedTime extracts the elapsed time suffix from an OpenCode ▣ line.
-// The ▣ line is ALWAYS present (static chrome) but the elapsed time is useful.
-// It also extracts the task name (e.g., "Build", "Compaction") as context.
-// Input:  "▣  Build · claude-opus-4.6 · 2m 17s"
-// Output: "Build · 2m 17s"
-// Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s"
-// Output: "Compaction · 1m 6s"
-// Input:  "▣  Build · claude-opus-4.6"
-// Output: "Build" (no elapsed time — return mode name as fallback)
+// extractOpenCodeElapsedTime extracts the task name and elapsed time from an OpenCode ▣ line.
+// The ▣ line is ALWAYS present (static chrome). "Build" and "Plan" are standard modes
+// that are noise — we suppress them. Other task names like "Compaction" are meaningful.
+// Input:  "▣  Build · claude-opus-4.6 · 2m 17s"    → "" (Build is noise)
+// Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s" → "Compaction · 1m 6s"
+// Input:  "▣  Build · claude-opus-4.6"               → "" (Build is noise)
 func extractOpenCodeElapsedTime(line string) string {
 	trimmed := strings.TrimSpace(line)
 	idx := strings.Index(trimmed, "▣")
@@ -1547,6 +1618,12 @@ func extractOpenCodeElapsedTime(line string) string {
 	// Split on " · " to get segments: [taskName, model, elapsed?]
 	segments := strings.Split(rest, " · ")
 	taskName := strings.TrimSpace(segments[0])
+
+	// "Build" and "Plan" are standard OpenCode modes — not useful as status.
+	// Suppress them entirely so bead info can be the primary content.
+	if taskName == "Build" || taskName == "Plan" {
+		return ""
+	}
 
 	if len(segments) < 3 {
 		// No elapsed time segment — return mode name as fallback
@@ -2090,6 +2167,555 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 	m.flashTime = time.Now()
 }
 
+// beadsPollInterval controls how often we query the beads DB.
+// Slower than the 1s tmux poll since DB queries are heavier.
+const beadsPollInterval = 5 * time.Second
+
+// agentBeadMatch holds the parsed info for an agent bead, matched to its AgentLight.
+type agentBeadMatch struct {
+	agent      *AgentLight
+	rig        string
+	role       string
+	fields     *beads.AgentFields
+	hookBeadID string // from HookBead slot or parsed fields
+	activeMR   string // from fields.ActiveMR (refinery only)
+}
+
+// pollBeadsWork queries the beads DB for all agents' current work assignments.
+// Called on a slower cadence than the tmux session poll to avoid hammering the DB.
+//
+// Performance: uses batched ShowMultiple() to fetch all hook beads and ActiveMR
+// beads in a single bd subprocess per rig, instead of N individual Show() calls.
+func (m *Model) pollBeadsWork() {
+	if m.townRoot == "" {
+		return
+	}
+
+	now := time.Now()
+	if now.Sub(m.lastBeadsPoll) < beadsPollInterval {
+		return
+	}
+	m.lastBeadsPoll = now
+
+	// Discover rig beads directories (cached after first discovery)
+	if m.rigBeadsDirs == nil {
+		m.rigBeadsDirs = m.discoverRigBeadsDirs()
+	}
+
+	// Build lookup from session name to agent for fast matching
+	agentBySession := make(map[string]*AgentLight, len(m.agents))
+	for _, a := range m.agents {
+		agentBySession[a.SessionName] = a
+	}
+
+	// Query each rig's beads DB for agent beads
+	for _, beadsDir := range m.rigBeadsDirs {
+		b := beads.New(beadsDir)
+		agentBeads, err := b.ListAgentBeads()
+		if err != nil {
+			continue
+		}
+
+		// ── Pass 1: Parse agent beads, collect IDs to batch-fetch ──
+		var matches []agentBeadMatch
+		beadIDsToFetch := make(map[string]bool) // deduplicated set of bead IDs
+
+		for id, issue := range agentBeads {
+			rig, role, name, ok := beads.ParseAgentBeadID(id)
+			if !ok {
+				continue
+			}
+
+			// Find the matching AgentLight by deriving the session name
+			sessionName := deriveSessionNameForBeads(rig, role, name)
+			agent, found := agentBySession[sessionName]
+			if !found {
+				for _, alt := range alternateSessionNames(rig, role, name) {
+					if a, ok := agentBySession[alt]; ok {
+						agent = a
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				continue
+			}
+
+			// Parse agent fields
+			fields := beads.ParseAgentFields(issue.Description)
+			if fields != nil {
+				agent.AgentState = fields.AgentState
+			}
+
+			// Keep patrol summary warm for patrol agents (uses cache, see below)
+			if patrolRoles[role] {
+				if summary := m.fetchLastPatrolSummaryCached(b, rig, role); summary != "" {
+					agent.LastPatrol = summary
+				}
+			}
+
+			// Determine which bead ID to fetch
+			hookBeadID := issue.HookBead
+			if hookBeadID == "" && fields != nil {
+				hookBeadID = fields.HookBead
+			}
+
+			match := agentBeadMatch{
+				agent:      agent,
+				rig:        rig,
+				role:       role,
+				fields:     fields,
+				hookBeadID: hookBeadID,
+			}
+
+			// Refinery agents use ActiveMR instead of HookBead
+			if hookBeadID == "" && role == "refinery" && fields != nil && fields.ActiveMR != "" {
+				match.activeMR = fields.ActiveMR
+				beadIDsToFetch[fields.ActiveMR] = true
+			} else if hookBeadID != "" {
+				beadIDsToFetch[hookBeadID] = true
+			}
+
+			matches = append(matches, match)
+		}
+
+		// ── Batch fetch all needed beads in one subprocess ──
+		var fetchedBeads map[string]*beads.Issue
+		if len(beadIDsToFetch) > 0 {
+			ids := make([]string, 0, len(beadIDsToFetch))
+			for id := range beadIDsToFetch {
+				ids = append(ids, id)
+			}
+			fetchedBeads, _ = b.ShowMultiple(ids)
+		}
+		if fetchedBeads == nil {
+			fetchedBeads = make(map[string]*beads.Issue)
+		}
+
+		// ── Pass 2: Apply fetched bead data to agents ──
+		// Also collect molecule IDs that need children queries.
+		type molQuery struct {
+			agent      *AgentLight
+			moleculeID string
+		}
+		var molQueries []molQuery
+
+		for _, match := range matches {
+			agent := match.agent
+
+			if match.activeMR != "" {
+				// Refinery with ActiveMR
+				agent.WorkBeadID = match.activeMR
+				mrBead := fetchedBeads[match.activeMR]
+				if mrBead != nil {
+					agent.WorkBeadTitle = mrBead.Title
+					mrFields := beads.ParseMRFields(mrBead)
+					if mrFields != nil && mrFields.Branch != "" && mrBead.Title == "" {
+						agent.WorkBeadTitle = "MR: " + mrFields.Branch
+					}
+				} else {
+					agent.WorkBeadTitle = ""
+				}
+				agent.FormulaName = ""
+				agent.StepCurrent = ""
+				agent.StepsDone = 0
+				agent.StepsTotal = 0
+				continue
+			}
+
+			if match.hookBeadID == "" {
+				agent.WorkBeadID = ""
+				agent.WorkBeadTitle = ""
+				agent.FormulaName = ""
+				agent.StepCurrent = ""
+				agent.StepsDone = 0
+				agent.StepsTotal = 0
+				continue
+			}
+
+			hookBead := fetchedBeads[match.hookBeadID]
+			if hookBead == nil {
+				agent.WorkBeadID = match.hookBeadID
+				agent.WorkBeadTitle = ""
+				agent.FormulaName = ""
+				agent.StepCurrent = ""
+				agent.StepsDone = 0
+				agent.StepsTotal = 0
+				continue
+			}
+
+			agent.WorkBeadID = match.hookBeadID
+			agent.WorkBeadTitle = hookBead.Title
+
+			attachment := beads.ParseAttachmentFields(hookBead)
+			if attachment == nil {
+				agent.FormulaName = ""
+				agent.StepCurrent = ""
+				agent.StepsDone = 0
+				agent.StepsTotal = 0
+				continue
+			}
+
+			agent.FormulaName = attachment.AttachedFormula
+			if attachment.AttachedMolecule != "" {
+				molQueries = append(molQueries, molQuery{agent: agent, moleculeID: attachment.AttachedMolecule})
+			} else {
+				agent.StepCurrent = ""
+				agent.StepsDone = 0
+				agent.StepsTotal = 0
+			}
+		}
+
+		// ── Pass 3: Fetch molecule progress ──
+		// Each molecule needs a List(parent=moleculeID) call. These can't be
+		// batched into one bd call, but there are typically only 0-3 molecules
+		// active at a time per rig.
+		for _, mq := range molQueries {
+			m.fetchMoleculeProgress(b, mq.agent, mq.moleculeID)
+		}
+	}
+
+	// ── Pass 4: Populate patrol summaries for hq agents without agent beads ──
+	// The deacon is a town-level agent whose patrol wisps live in the hq beads
+	// DB, but it has no agent bead (gt:agent label). Without this pass, its
+	// LastPatrol would never get populated since the main loop above only
+	// processes agents discovered through ListAgentBeads().
+	if hqBeadsDir, ok := m.rigBeadsDirs["hq"]; ok {
+		hqBeads := beads.New(hqBeadsDir)
+		for _, a := range m.agents {
+			if a.Rig != "hq" || !patrolRoles[a.Role] {
+				continue
+			}
+			// Skip if already populated by the agent-bead loop above
+			if a.LastPatrol != "" {
+				continue
+			}
+			if summary := m.fetchLastPatrolSummaryCached(hqBeads, a.Rig, a.Role); summary != "" {
+				a.LastPatrol = summary
+			}
+		}
+	}
+}
+
+// fetchMoleculeProgress queries step progress for an attached molecule.
+// Uses only List(parent=moleculeID) to get all children, then derives the
+// current step from status and BlockedByCount — avoiding a separate
+// ReadyForMol subprocess call.
+func (m *Model) fetchMoleculeProgress(b *beads.Beads, agent *AgentLight, moleculeID string) {
+	children, err := b.List(beads.ListOptions{
+		Parent:   moleculeID,
+		Status:   "all",
+		Priority: -1,
+	})
+	if err != nil || len(children) == 0 {
+		return
+	}
+
+	agent.StepsTotal = len(children)
+	agent.StepsDone = 0
+	agent.StepCurrent = ""
+
+	var currentStep *beads.Issue
+	var firstReady *beads.Issue
+	for _, child := range children {
+		switch child.Status {
+		case "closed":
+			agent.StepsDone++
+		case "in_progress", beads.StatusPinned, beads.StatusHooked:
+			if currentStep == nil {
+				currentStep = child
+			}
+		case "open":
+			// A step is "ready" if it's open and not blocked by anything.
+			// This replaces the separate ReadyForMol() subprocess call.
+			if firstReady == nil && child.BlockedByCount == 0 {
+				firstReady = child
+			}
+		}
+	}
+
+	if currentStep != nil {
+		agent.StepCurrent = currentStep.Title
+	} else if firstReady != nil {
+		agent.StepCurrent = firstReady.Title
+	}
+}
+
+// patrolRoles are agent roles that run patrol cycles and report summaries.
+var patrolRoles = map[string]bool{
+	"refinery": true,
+	"witness":  true,
+	"deacon":   true,
+}
+
+// patrolAssignee returns the beads assignee string for a patrol agent.
+// Rig-scoped roles use "rig/role", global roles use just "role".
+func patrolAssignee(rig, role string) string {
+	switch role {
+	case "deacon", "mayor":
+		return role
+	default:
+		return rig + "/" + role
+	}
+}
+
+// patrolCacheEntry holds a cached patrol summary with TTL.
+type patrolCacheEntry struct {
+	summary   string
+	fetchedAt time.Time
+}
+
+// patrolCacheTTL controls how long patrol summaries are cached.
+// Patrol summaries change every few minutes, not every 5s beads poll.
+const patrolCacheTTL = 30 * time.Second
+
+// fetchLastPatrolSummaryCached returns a cached patrol summary if fresh,
+// otherwise queries the beads DB and caches the result.
+func (m *Model) fetchLastPatrolSummaryCached(b *beads.Beads, rig, role string) string {
+	key := rig + "/" + role
+	now := time.Now()
+
+	if m.patrolCache != nil {
+		if entry, ok := m.patrolCache[key]; ok && now.Sub(entry.fetchedAt) < patrolCacheTTL {
+			return entry.summary
+		}
+	}
+
+	summary := fetchLastPatrolSummary(b, rig, role)
+
+	if m.patrolCache == nil {
+		m.patrolCache = make(map[string]patrolCacheEntry)
+	}
+	m.patrolCache[key] = patrolCacheEntry{summary: summary, fetchedAt: now}
+	return summary
+}
+
+// fetchLastPatrolSummary queries the beads DB for the most recently closed
+// patrol wisp and returns the cleaned-up summary text.
+// Returns "" if no patrol summary is found.
+func fetchLastPatrolSummary(b *beads.Beads, rig, role string) string {
+	assignee := patrolAssignee(rig, role)
+	closed, err := b.List(beads.ListOptions{
+		Status:       "closed",
+		Assignee:     assignee,
+		Priority:     -1,
+		Limit:        5,
+		IncludeInfra: true, // patrol wisps are ephemeral beads
+	})
+	if err != nil || len(closed) == 0 {
+		return ""
+	}
+
+	// Find most recent patrol report (description starts with "Patrol report: ")
+	for _, issue := range closed {
+		if !strings.HasPrefix(issue.Description, "Patrol report: ") {
+			continue
+		}
+		summary := strings.TrimPrefix(issue.Description, "Patrol report: ")
+		return cleanPatrolSummary(summary)
+	}
+	return ""
+}
+
+// cleanPatrolSummary strips boilerplate from patrol summaries to surface
+// the operationally useful content.
+//
+// Input:  "Cycle 1: Queue empty (12th consecutive empty cycle overall). Inbox clean. Session healthy. Looping."
+// Output: "Queue empty. Inbox clean."
+func cleanPatrolSummary(s string) string {
+	// Strip common cycle/patrol prefixes:
+	//   "Cycle N: ...", "Cycle clean: ...", "Patrol N: ..."
+	if idx := strings.Index(s, ": "); idx >= 0 && idx < 20 {
+		prefix := s[:idx]
+		if strings.HasPrefix(prefix, "Cycle ") || strings.HasPrefix(prefix, "Patrol ") {
+			s = s[idx+2:]
+		}
+	}
+
+	// Remove parenthetical asides about consecutive cycles or overall counts
+	// e.g., "(12th consecutive empty cycle overall)", "(3rd consecutive empty cycle)"
+	for {
+		start := strings.Index(s, "(")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(s[start:], ")")
+		if end < 0 {
+			break
+		}
+		inner := strings.ToLower(s[start+1 : start+end])
+		if strings.Contains(inner, "consecutive") || strings.Contains(inner, "overall") {
+			before := strings.TrimRight(s[:start], " ,")
+			after := s[start+end+1:]
+			s = before + after
+		} else {
+			break // don't strip other parentheticals
+		}
+	}
+
+	// Strip trailing health chatter (order matters — longest first)
+	for _, suffix := range []string{
+		"Session fresh, looping.",
+		"Session healthy. Looping.",
+		"Session healthy.",
+		"Looping.",
+		"No changes.",
+		"No mail.",
+	} {
+		s = strings.TrimSuffix(s, suffix)
+	}
+
+	// Strip "All idle polecats healthy" and similar trailing boilerplate
+	for _, suffix := range []string{
+		"All idle polecats healthy",
+		"Deacon alive",
+		"No timer gates, no swarm",
+	} {
+		s = strings.TrimSuffix(strings.TrimRight(s, " ."), suffix)
+	}
+
+	s = strings.TrimRight(s, " .")
+	if s != "" {
+		s += "."
+	}
+	return s
+}
+
+// discoverRigBeadsDirs finds the beads directory for each rig.
+func (m *Model) discoverRigBeadsDirs() map[string]string {
+	dirs := make(map[string]string)
+
+	// HQ beads (town-level)
+	hqBeads := filepath.Join(m.townRoot, ".beads")
+	if _, err := os.Stat(hqBeads); err == nil {
+		dirs["hq"] = m.townRoot
+	}
+
+	// Discover rigs from rigs.json
+	rigsConfigPath := filepath.Join(m.townRoot, "mayor", "rigs.json")
+	if rigsConfig, err := config.LoadRigsConfig(rigsConfigPath); err == nil {
+		for rigName := range rigsConfig.Rigs {
+			rigDir := findRigBeadsDir(m.townRoot, rigName)
+			if rigDir != "" {
+				dirs[rigName] = rigDir
+			}
+		}
+		return dirs
+	}
+
+	// Fallback: scan directory
+	entries, err := os.ReadDir(m.townRoot)
+	if err != nil {
+		return dirs
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "mayor" || name == "daemon" || name == "deacon" ||
+			name == ".git" || name == "docs" || name[0] == '.' {
+			continue
+		}
+		rigDir := findRigBeadsDir(m.townRoot, name)
+		if rigDir != "" {
+			dirs[name] = rigDir
+		}
+	}
+	return dirs
+}
+
+// findRigBeadsDir returns the beads work directory for a rig.
+// Returns empty string if no beads directory exists.
+// A beads directory must have metadata.json to be usable (the dir
+// might exist with only locks/audit files but no database config).
+func findRigBeadsDir(townRoot, rigName string) string {
+	// Prefer mayor/rig/.beads (canonical location) if it has metadata.json
+	mayorBeads := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads")
+	if _, err := os.Stat(filepath.Join(mayorBeads, "metadata.json")); err == nil {
+		return filepath.Dir(mayorBeads) // beads.New wants the parent of .beads
+	}
+	// Fall back to rig-root .beads
+	rigBeads := filepath.Join(townRoot, rigName, ".beads")
+	if _, err := os.Stat(filepath.Join(rigBeads, "metadata.json")); err == nil {
+		return filepath.Dir(rigBeads)
+	}
+	return ""
+}
+
+// deriveSessionNameForBeads maps agent bead components to tmux session name.
+// This reverses the parseSessionName logic using the session name functions.
+func deriveSessionNameForBeads(rig, role, name string) string {
+	registry := session.DefaultRegistry()
+
+	switch role {
+	case "mayor":
+		return session.MayorSessionName()
+	case "deacon":
+		if name == "boot" {
+			return "hq-boot"
+		}
+		return session.DeaconSessionName()
+	case "dog":
+		prefix := registry.PrefixForRig(rig)
+		if prefix == "" {
+			prefix = "gt"
+		}
+		return prefix + "-dog-" + name
+	case "witness":
+		return session.WitnessSessionName(registry.PrefixForRig(rig))
+	case "refinery":
+		return session.RefinerySessionName(registry.PrefixForRig(rig))
+	case "crew":
+		return session.CrewSessionName(registry.PrefixForRig(rig), name)
+	case "polecat":
+		return session.PolecatSessionName(registry.PrefixForRig(rig), name)
+	default:
+		prefix := registry.PrefixForRig(rig)
+		if prefix == "" {
+			prefix = "gt"
+		}
+		return prefix + "-" + role
+	}
+}
+
+// alternateSessionNames returns alternative session name derivations to try.
+// Handles cases where the prefix registry hasn't resolved yet or uses hq-.
+func alternateSessionNames(rig, role, name string) []string {
+	var alts []string
+	for _, p := range []string{"gt", "hq"} {
+		alt := deriveSessionNameFromComponents(p, role, name)
+		alts = append(alts, alt)
+	}
+	return alts
+}
+
+// deriveSessionNameFromComponents builds a session name from a specific prefix.
+func deriveSessionNameFromComponents(prefix, role, name string) string {
+	switch role {
+	case "mayor":
+		return prefix + "-mayor"
+	case "deacon":
+		if name == "boot" {
+			return prefix + "-boot"
+		}
+		return prefix + "-deacon"
+	case "witness":
+		return prefix + "-witness"
+	case "refinery":
+		return prefix + "-refinery"
+	case "crew":
+		return prefix + "-crew-" + name
+	case "polecat":
+		return prefix + "-" + name
+	case "dog":
+		return prefix + "-dog-" + name
+	default:
+		return prefix + "-" + role
+	}
+}
+
 // fetchAgentDetails fetches additional info for hover tooltip.
 func (m *Model) fetchAgentDetails(a *AgentLight) {
 	// Capture last 20 lines to extract bead IDs and recent activity
@@ -2101,18 +2727,8 @@ func (m *Model) fetchAgentDetails(a *AgentLight) {
 
 	content := string(out)
 
-	// Extract bead IDs (pattern: word-shortid, e.g., wp-abc123, gp-xyz789)
-	// Look for the most recent bead ID
-	lines := strings.Split(content, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := lines[i]
-		if beadID := extractBeadID(line); beadID != "" {
-			a.CurrentBead = beadID
-			break
-		}
-	}
-
 	// Store last few non-empty lines for tooltip
+	lines := strings.Split(content, "\n")
 	var recent []string
 	for i := len(lines) - 1; i >= 0 && len(recent) < 3; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -2123,26 +2739,6 @@ func (m *Model) fetchAgentDetails(a *AgentLight) {
 	if len(recent) > 0 {
 		a.RecentOutput = strings.Join(recent, "\n")
 	}
-}
-
-// extractBeadID extracts a bead ID from a line of text.
-// Bead IDs follow the pattern: {prefix}-{shortid} like wp-abc123, gp-xyz789
-func extractBeadID(line string) string {
-	// Common patterns in Gas Town output
-	// "bd show wp-abc123", "Closed wp-abc123", "wp-abc123:", etc.
-	words := strings.Fields(line)
-	for _, word := range words {
-		// Strip trailing punctuation
-		word = strings.TrimRight(word, ",:;.!?")
-		// Check if it matches bead ID pattern: 2-3 letters, dash, 5-6 alphanumeric
-		if len(word) >= 7 && len(word) <= 12 {
-			parts := strings.Split(word, "-")
-			if len(parts) == 2 && len(parts[0]) >= 2 && len(parts[0]) <= 3 && len(parts[1]) >= 5 {
-				return word
-			}
-		}
-	}
-	return ""
 }
 
 // detectAgentType reads GT_AGENT from the tmux session environment.
