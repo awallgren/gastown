@@ -639,19 +639,14 @@ func renderContextIndicator(percent int, compact bool, tokenCount int, sessionCr
 		}
 	}
 
+	// rateStr is computed above but hidden from display for now.
+	_ = rateStr
+
 	var text string
 	if compact {
-		if rateStr != "" {
-			text = fmt.Sprintf("%d%% %s", used, rateStr)
-		} else {
-			text = fmt.Sprintf("%d%%", used)
-		}
+		text = fmt.Sprintf("%d%%", used)
 	} else {
-		if rateStr != "" {
-			text = fmt.Sprintf("%d%% used %s", used, rateStr)
-		} else {
-			text = fmt.Sprintf("%d%% used", used)
-		}
+		text = fmt.Sprintf("%d%% used", used)
 	}
 
 	var style lipgloss.Style
