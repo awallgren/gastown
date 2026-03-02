@@ -14,8 +14,9 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"strconv"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -2190,8 +2191,8 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 		`tell application "iTerm2"
 			set newWindow to (create window with default profile command "%s")
 			tell current session of current window
-				set columns to 192
-				set rows to 60
+				set columns to 180
+				set rows to 50
 			end tell
 		end tell`, attachCmd))
 	if err := iterm.Start(); err == nil {
@@ -2205,9 +2206,9 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 		`tell application "Terminal"
 			do script "%s"
 			activate
-			-- resize the front window to 192 columns x 60 rows
-			set number of columns of front window to 192
-			set number of rows of front window to 60
+			-- resize the front window to 180 columns x 60 rows
+			set number of columns of front window to 180
+			set number of rows of front window to 50
 		end tell`, attachCmd))
 	if err := terminal.Start(); err == nil {
 		m.flashMessage = "Opened Terminal → " + sessionName

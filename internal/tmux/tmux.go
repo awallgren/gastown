@@ -38,8 +38,8 @@ const nudgeLockTimeout = 30 * time.Second
 // 192x60 gives coding agents (especially OpenCode) comfortable room for
 // side panels, tool output, and wide diffs without excessive wrapping.
 const (
-	defaultWindowCols = "192"
-	defaultWindowRows = "60"
+	defaultWindowCols = "180"
+	defaultWindowRows = "50"
 )
 
 // validSessionNameRe validates session names to prevent shell injection
