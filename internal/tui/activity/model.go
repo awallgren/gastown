@@ -1243,6 +1243,13 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 	// 1. Total length > 100 (sidebar only appears on wide panes)
 	// 2. There's a gap of 8+ spaces
 	// 3. Text after the gap matches a sidebar marker
+	//
+	// Strategy: collect the position where each sidebar marker starts,
+	// then use the minimum marker position as the sidebar column. Using
+	// the marker position (not the gap start) prevents false truncation
+	// when lines have short main content followed by long gaps — the
+	// sidebar boundary is where the sidebar text begins, not where the
+	// preceding whitespace begins.
 	sidebarCol := 0
 	for _, line := range lines {
 		if len(line) < 100 {
@@ -1266,10 +1273,15 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 			after := strings.TrimSpace(line[j:])
 			for _, marker := range sidebarMarkers {
 				if strings.HasPrefix(after, marker) {
-					// Found sidebar boundary. Use the start of the gap
-					// as the truncation point (conservative).
-					if sidebarCol == 0 || i < sidebarCol {
-						sidebarCol = i
+					// Use the marker position (j) as the sidebar boundary,
+					// with a small buffer for visual separation. Subtract 2
+					// to trim the trailing whitespace before the marker.
+					markerCol := j - 2
+					if markerCol < 0 {
+						markerCol = 0
+					}
+					if sidebarCol == 0 || markerCol < sidebarCol {
+						sidebarCol = markerCol
 					}
 					break
 				}
