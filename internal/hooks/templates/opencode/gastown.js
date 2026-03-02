@@ -68,6 +68,11 @@ export const GasTown = async ({ $, directory }) => {
         primePromise = loadPrime();
       }
       if (event?.type === "session.compacted") {
+        // Signal compaction finished to gt top, then reload prime context.
+        const session = await getSession();
+        emit(
+          `gt top emit compaction_finished --actor ${esc(role)} --status "done" --message "${session}"`,
+        );
         // Reset so next system.transform gets fresh context.
         primePromise = loadPrime();
       }
@@ -119,6 +124,10 @@ export const GasTown = async ({ $, directory }) => {
     },
 
     "experimental.session.compacting": async ({ sessionID }, output) => {
+      const session = await getSession();
+      emit(
+        `gt top emit compaction_started --actor ${esc(role)} --status "compacting" --message "${session}"`,
+      );
       const roleDisplay = role || "unknown";
       output.context.push(`
 ## Gas Town Multi-Agent System
