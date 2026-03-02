@@ -67,6 +67,9 @@ type AgentLight struct {
 	CurrentTool       string // currently executing tool/command (e.g., "Bash(git status)")
 	SessionLimitPct   int    // session usage percent (0=unknown, sticky)
 	SessionLimitReset string // when the session limit resets (sticky)
+	IsCompacting      bool   // sticky: compaction detected, persists until cleared
+	PreCompactCtxPct  int    // context% snapshot from when compaction started, for drop detection
+	PrevStatusText    string // previous cycle's StatusText, used to avoid "streaming" clobbering useful info
 
 	// Work tracking (from beads DB, updated on slower cadence)
 	WorkBeadID    string // assigned/hooked bead ID (e.g., "wp-abc123")
@@ -259,8 +262,8 @@ func townRootFromShellCache() string {
 	return ""
 }
 
-// toolEvent represents a parsed tool_started or tool_finished event
-// from the events JSONL file, used to populate CurrentTool for non-Claude agents.
+// toolEvent represents a parsed tool_started/tool_finished or compaction_started/compaction_finished
+// event from the events JSONL file, used to populate CurrentTool and IsCompacting for non-Claude agents.
 type toolEvent struct {
 	Timestamp time.Time
 	Actor     string // e.g., "gastown/crew/joe"
@@ -307,9 +310,10 @@ func (m *Model) readRecentToolEvents() {
 			continue
 		}
 
-		// Quick pre-filter: only parse lines containing tool event types
+		// Quick pre-filter: only parse lines containing relevant event types
 		lineStr := string(line)
-		if !strings.Contains(lineStr, "tool_started") && !strings.Contains(lineStr, "tool_finished") {
+		if !strings.Contains(lineStr, "tool_started") && !strings.Contains(lineStr, "tool_finished") &&
+			!strings.Contains(lineStr, "compaction_started") && !strings.Contains(lineStr, "compaction_finished") {
 			continue
 		}
 
@@ -322,7 +326,8 @@ func (m *Model) readRecentToolEvents() {
 		if err := json.Unmarshal(line, &evt); err != nil {
 			continue
 		}
-		if evt.Type != "tool_started" && evt.Type != "tool_finished" {
+		if evt.Type != "tool_started" && evt.Type != "tool_finished" &&
+			evt.Type != "compaction_started" && evt.Type != "compaction_finished" {
 			continue
 		}
 
@@ -351,8 +356,9 @@ func (m *Model) readRecentToolEvents() {
 	}
 }
 
-// applyToolEvents populates CurrentTool for non-Claude agents using plugin-emitted events.
-// Matches events to agents by tmux session name (preferred) or actor name (fallback).
+// applyToolEvents populates CurrentTool and IsCompacting for non-Claude agents
+// using plugin-emitted events. Matches events to agents by tmux session name
+// (preferred) or actor name (fallback).
 // This is the sole owner of CurrentTool for OpenCode agents — parsePaneContentOpenCode
 // does not set it.
 func (m *Model) applyToolEvents() {
@@ -380,38 +386,38 @@ func (m *Model) applyToolEvents() {
 	}
 
 	// Process events in chronological order — last event for a session wins.
-	// tool_finished clears the tool; tool_started sets it.
 	for _, evt := range m.recentToolEvents {
-		// Match by session name (most reliable)
+		// Find the matching agent by session name or actor fallback
+		var matched *AgentLight
 		if evt.Session != "" {
-			if a, ok := needsEvents[evt.Session]; ok {
-				if evt.EventType == "tool_started" {
-					a.CurrentTool = evt.Tool
-				} else {
-					a.CurrentTool = "" // tool_finished clears
-				}
-				continue
-			}
+			matched = needsEvents[evt.Session]
 		}
-		// Fallback: match by actor role path against session name
-		// Actor format: "gastown/crew/joe" → session: "gt-gastown-crew-joe" or similar
-		// This is a rough heuristic — session name matching is preferred
-		if evt.Actor != "" {
-			for _, a := range needsEvents {
-				// Check if the actor's agent name is contained in the session name
-				parts := strings.Split(evt.Actor, "/")
-				if len(parts) > 0 {
-					lastPart := parts[len(parts)-1]
+		if matched == nil && evt.Actor != "" {
+			parts := strings.Split(evt.Actor, "/")
+			if len(parts) > 0 {
+				lastPart := parts[len(parts)-1]
+				for _, a := range needsEvents {
 					if strings.Contains(a.SessionName, lastPart) {
-						if evt.EventType == "tool_started" {
-							a.CurrentTool = evt.Tool
-						} else {
-							a.CurrentTool = ""
-						}
+						matched = a
 						break
 					}
 				}
 			}
+		}
+		if matched == nil {
+			continue
+		}
+
+		switch evt.EventType {
+		case "tool_started":
+			matched.CurrentTool = evt.Tool
+		case "tool_finished":
+			matched.CurrentTool = ""
+		case "compaction_started":
+			matched.IsCompacting = true
+			matched.PreCompactCtxPct = matched.ContextPercent
+		case "compaction_finished":
+			matched.IsCompacting = false
 		}
 	}
 }
@@ -1371,10 +1377,12 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	}
 
 	// Signals we extract from the pane.
-	var elapsedTime string     // from ▣ line (e.g., "Build · 2m 17s" or just "Build")
-	var pendingOp string       // from ~ lines ("Preparing write...", etc.)
-	var agentIsStreaming bool  // "esc interrupt" visible = actively generating
-	var activeToolPanel string // from braille spinner lines (bottom-most = most recent)
+	var elapsedTime string          // from ▣ line (e.g., "Build · 2m 17s" or just "Build")
+	var pendingOp string            // from ~ lines ("Preparing write...", etc.)
+	var agentIsStreaming bool       // "esc interrupt" visible = actively generating
+	var activeToolPanel string      // from braille spinner lines (bottom-most = most recent)
+	var sawCompaction bool          // compaction divider or ▣ Compaction in THIS capture
+	var sawNonCompactionHeader bool // ▣ with non-Compaction mode in THIS capture
 
 	// sawBillingError tracks whether we've seen a billing/payment error.
 	// Unlike permission dialogs (which are active UI elements that disappear
@@ -1401,6 +1409,20 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		// ── ▣ line: mode name and optional elapsed time ──
 		if strings.HasPrefix(trimmed, "▣") {
 			elapsedTime = extractOpenCodeElapsedTime(trimmed)
+			// Detect compaction mode from ▣ header (appears after compaction finishes)
+			if strings.Contains(trimmed, "Compaction") {
+				sawCompaction = true
+			} else {
+				// ▣ with non-Compaction mode (Build, Plan, etc.) — compaction is over
+				sawNonCompactionHeader = true
+			}
+		}
+
+		// ── Compaction divider: "───── Compaction ─────" ──
+		// OpenCode renders a top-border box with centered " Compaction " title
+		// when compaction starts. This is the most reliable in-progress signal.
+		if strings.Contains(trimmed, "Compaction") && strings.ContainsRune(trimmed, '─') {
+			sawCompaction = true
 		}
 
 		// ── Pending operation: "~ Preparing write..." / "~ Writing command..." ──
@@ -1530,15 +1552,48 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	} else if agentIsStreaming {
 		if sidebar.inProgressTodo != "" {
 			a.StatusText = sidebar.inProgressTodo
+		} else if a.PrevStatusText != "" {
+			// Agent is streaming (generating text) — keep the last meaningful
+			// status with "..." to show it's still working on that, rather than
+			// clobbering it with the uninformative "streaming".
+			s := a.PrevStatusText
+			s = strings.TrimSuffix(s, "...")
+			a.StatusText = s + "..."
 		} else if elapsedTime != "" {
-			a.StatusText = "streaming · " + elapsedTime
-		} else {
-			a.StatusText = "streaming"
+			a.StatusText = elapsedTime
 		}
+		// else: StatusText stays "" — no previous context to carry forward
 	} else if sidebar.inProgressTodo != "" {
 		a.StatusText = sidebar.inProgressTodo
 	} else if elapsedTime != "" {
 		a.StatusText = elapsedTime
+	}
+
+	// Compaction is sticky — once detected, persists until we see positive evidence
+	// it's over. Two clear signals:
+	//   1. ▣ line with non-Compaction mode (Build, Plan, etc.)
+	//   2. Context% drops significantly from pre-compaction level (pruned + summarized)
+	// This prevents blinking when the divider/header scroll off the visible pane.
+	if sawCompaction && !a.IsCompacting {
+		a.IsCompacting = true
+		a.PreCompactCtxPct = a.ContextPercent // snapshot before we zero it
+	}
+	if sawNonCompactionHeader {
+		a.IsCompacting = false
+	}
+	// Context% drop: compaction prunes old context, so usage drops dramatically.
+	// If we see context% reappear at well below the pre-compaction level, it's over.
+	if a.IsCompacting && a.PreCompactCtxPct > 0 && a.ContextPercent > 0 &&
+		a.ContextPercent < a.PreCompactCtxPct/2 {
+		a.IsCompacting = false
+	}
+
+	// Apply compaction override — agent is summarizing context, not doing real work.
+	// Matches Claude Code behavior (model.go:1133-1137).
+	if a.IsCompacting {
+		a.StatusText = "COMPACTING"
+		a.CurrentTool = ""
+		a.ContextPercent = 0
 	}
 
 	// HitLimit is terminal — clear stale status
@@ -1549,6 +1604,11 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	if a.WaitingForHuman && a.WaitingReason == "needs payment method" {
 		a.StatusText = ""
 		a.CurrentTool = ""
+	}
+
+	// Save for next cycle — lets streaming carry forward the last meaningful status.
+	if a.StatusText != "" && !strings.HasSuffix(a.StatusText, "...") {
+		a.PrevStatusText = a.StatusText
 	}
 }
 
