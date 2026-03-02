@@ -185,6 +185,14 @@ func runActivityEmit(cmd *cobra.Command, args []string) error {
 			payload["session"] = activityMessage
 		}
 
+	case events.TypeCompactionStarted, events.TypeCompactionFinished:
+		// Compaction events (emitted by gastown.js plugin for gt top).
+		// --message carries the tmux session name for agent matching.
+		payload = make(map[string]interface{})
+		if activityMessage != "" {
+			payload["session"] = activityMessage
+		}
+
 	case events.TypeMergeStarted, events.TypeMerged, events.TypeMergeFailed, events.TypeMergeSkipped:
 		// Refinery events - flexible payload
 		payload = make(map[string]interface{})

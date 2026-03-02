@@ -79,6 +79,10 @@ const (
 	TypeToolStarted  = "tool_started"  // Agent began executing a tool
 	TypeToolFinished = "tool_finished" // Agent finished executing a tool
 	TypeAgentIdle    = "agent_idle"    // Agent is idle (waiting for prompt)
+
+	// Compaction events (emitted by OpenCode plugin for gt top)
+	TypeCompactionStarted  = "compaction_started"  // Agent context compaction began
+	TypeCompactionFinished = "compaction_finished" // Agent context compaction finished
 )
 
 // EventsFile is the name of the raw events log.
