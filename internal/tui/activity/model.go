@@ -2597,6 +2597,18 @@ func fetchLastPatrolSummary(b *beads.Beads, rig, role string) string {
 // Input:  "Cycle 1: Queue empty (12th consecutive empty cycle overall). Inbox clean. Session healthy. Looping."
 // Output: "Queue empty. Inbox clean."
 func cleanPatrolSummary(s string) string {
+	// Strip multi-line step audit appended by gt patrol (e.g.,
+	// "\nSteps: NOT REPORTED (?/26)" or "\nSteps: heartbeat OK | ...").
+	// This appears after a newline in the patrol wisp description and
+	// doesn't belong in the one-line status display.
+	if idx := strings.Index(s, "\nSteps:"); idx >= 0 {
+		s = s[:idx]
+	}
+	// Also handle "\n\nSteps:" (double newline before steps)
+	if idx := strings.Index(s, "\n\nSteps:"); idx >= 0 {
+		s = s[:idx]
+	}
+
 	// Strip common cycle/patrol prefixes:
 	//   "Cycle N: ...", "Cycle clean: ...", "Patrol N: ..."
 	if idx := strings.Index(s, ": "); idx >= 0 && idx < 20 {
@@ -2646,6 +2658,14 @@ func cleanPatrolSummary(s string) string {
 		"No timer gates, no swarm",
 	} {
 		s = strings.TrimSuffix(strings.TrimRight(s, " ."), suffix)
+	}
+
+	// Collapse any remaining newlines into spaces — patrol summaries
+	// must be single-line for the agent status display.
+	s = strings.ReplaceAll(s, "\n", " ")
+	// Collapse multiple spaces from newline replacement
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
 	}
 
 	s = strings.TrimRight(s, " .")
