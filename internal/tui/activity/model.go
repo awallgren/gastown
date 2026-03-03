@@ -291,8 +291,9 @@ func (m *Model) readRecentToolEvents() {
 	defer f.Close()
 
 	// Seek to near the end of the file — we only care about recent events.
-	// Read last 8KB which should contain plenty of recent lines.
-	const tailSize = 8192
+	// Tool events use a 15s window, but compaction events use 10 minutes.
+	// At ~2 events/s * ~160 bytes, 10 minutes ≈ 192KB. Use 256KB to be safe.
+	const tailSize = 256 * 1024
 	info, err := f.Stat()
 	if err != nil {
 		return
@@ -304,6 +305,7 @@ func (m *Model) readRecentToolEvents() {
 	}
 
 	cutoff := time.Now().Add(-15 * time.Second)
+	compactionCutoff := time.Now().Add(-10 * time.Minute) // compaction events need longer window
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -336,8 +338,19 @@ func (m *Model) readRecentToolEvents() {
 		if err != nil {
 			continue
 		}
-		if ts.Before(cutoff) {
-			continue
+		// Compaction events use a longer window — they're rare (one pair per
+		// compaction cycle) and need to persist through the entire compaction
+		// duration (30-90+ seconds). Tool events use the short 15s window
+		// because they're rapid-fire.
+		isCompactionEvent := evt.Type == "compaction_started" || evt.Type == "compaction_finished"
+		if isCompactionEvent {
+			if ts.Before(compactionCutoff) {
+				continue
+			}
+		} else {
+			if ts.Before(cutoff) {
+				continue
+			}
 		}
 
 		te := toolEvent{
@@ -731,6 +744,18 @@ func (m *Model) updateAgents(sessions []sessionInfo) {
 	// hooks (tool.execute.before/after), sidestepping pane parsing.
 	m.readRecentToolEvents()
 	m.applyToolEvents()
+
+	// Apply compaction override AFTER both pane-scraping and event processing.
+	// IsCompacting may have been set by parsePaneContentOpenCode (pane-based)
+	// or applyToolEvents (event-based). We apply the override here so that
+	// event-based detection takes effect in the same cycle.
+	for _, a := range m.agents {
+		if a.IsCompacting {
+			a.StatusText = "COMPACTING"
+			a.CurrentTool = ""
+			a.ContextPercent = 0
+		}
+	}
 
 	// Poll beads DB for work assignments (slower cadence, guarded internally)
 	m.pollBeadsWork()
@@ -1390,12 +1415,17 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 	}
 
 	// Signals we extract from the pane.
-	var elapsedTime string          // from ▣ line (e.g., "Build · 2m 17s" or just "Build")
-	var pendingOp string            // from ~ lines ("Preparing write...", etc.)
-	var agentIsStreaming bool       // "esc interrupt" visible = actively generating
-	var activeToolPanel string      // from braille spinner lines (bottom-most = most recent)
-	var sawCompaction bool          // compaction divider or ▣ Compaction in THIS capture
-	var sawNonCompactionHeader bool // ▣ with non-Compaction mode in THIS capture
+	var elapsedTime string        // from ▣ line (e.g., "Build · 2m 17s" or just "Build")
+	var pendingOp string          // from ~ lines ("Preparing write...", etc.)
+	var agentIsStreaming bool     // "esc interrupt" visible = actively generating
+	var activeToolPanel string    // from braille spinner lines (bottom-most = most recent)
+	var sawCompactionDivider bool // "───── Compaction ─────" divider in THIS capture
+	// lastHeaderIsCompaction tracks whether the BOTTOM-MOST ▣ header in the
+	// pane is a Compaction header. We use only the last header because the pane
+	// contains scrollback — old "▣  Build" headers from previous messages would
+	// falsely clear IsCompacting if we checked all of them.
+	var lastHeaderIsCompaction bool
+	var sawAnyHeader bool
 
 	// sawBillingError tracks whether we've seen a billing/payment error.
 	// Unlike permission dialogs (which are active UI elements that disappear
@@ -1420,22 +1450,29 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		}
 
 		// ── ▣ line: mode name and optional elapsed time ──
+		// We track only the LAST (bottom-most) header because the pane contains
+		// scrollback from previous messages. Old "▣  Build" headers would falsely
+		// clear IsCompacting if we OR'd all headers together.
 		if strings.HasPrefix(trimmed, "▣") {
 			elapsedTime = extractOpenCodeElapsedTime(trimmed)
-			// Detect compaction mode from ▣ header (appears after compaction finishes)
+			sawAnyHeader = true
 			if strings.Contains(trimmed, "Compaction") {
-				sawCompaction = true
+				// "▣  Compaction · claude-opus-4.6 · 9.7s" (3+ segments = has elapsed)
+				// means compaction FINISHED — the ▣ header only renders elapsed time
+				// for completed messages. Treat as non-compaction (it's done).
+				// Count " · " separators to distinguish finished (2+) from active (1).
+				sepCount := strings.Count(trimmed, " · ")
+				lastHeaderIsCompaction = sepCount < 2
 			} else {
-				// ▣ with non-Compaction mode (Build, Plan, etc.) — compaction is over
-				sawNonCompactionHeader = true
+				lastHeaderIsCompaction = false
 			}
 		}
 
 		// ── Compaction divider: "───── Compaction ─────" ──
-		// OpenCode renders a top-border box with centered " Compaction " title
-		// when compaction starts. This is the most reliable in-progress signal.
+		// OpenCode renders a top-border box with centered " Compaction " title.
+		// Unlike ▣ headers, the divider is unambiguous — it only appears for compaction.
 		if strings.Contains(trimmed, "Compaction") && strings.ContainsRune(trimmed, '─') {
-			sawCompaction = true
+			sawCompactionDivider = true
 		}
 
 		// ── Pending operation: "~ Preparing write..." / "~ Writing command..." ──
@@ -1582,16 +1619,27 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		a.StatusText = elapsedTime
 	}
 
-	// Compaction is sticky — once detected, persists until we see positive evidence
-	// it's over. Two clear signals:
-	//   1. ▣ line with non-Compaction mode (Build, Plan, etc.)
-	//   2. Context% drops significantly from pre-compaction level (pruned + summarized)
-	// This prevents blinking when the divider/header scroll off the visible pane.
-	if sawCompaction && !a.IsCompacting {
+	// Compaction detection from pane-scraping. Two signals:
+	//   - Compaction divider ("───── Compaction ─────") — unambiguous in-progress signal
+	//   - Bottom-most ▣ header says "Compaction" — appears after compaction finishes
+	// We use only the LAST ▣ header because old "▣  Build" headers from previous
+	// messages linger in scrollback and would falsely clear IsCompacting.
+	//
+	// Note: applyToolEvents() runs AFTER this function and can also set/clear
+	// IsCompacting from plugin events. Event-based detection is more reliable
+	// during compaction (pane shows no distinguishing signals while streaming
+	// the compaction summary). Pane-scraping only catches it after compaction
+	// finishes (when the ▣ Compaction header appears).
+	sawCompactionInPane := sawCompactionDivider || (sawAnyHeader && lastHeaderIsCompaction)
+	sawNonCompactionHeader := sawAnyHeader && !lastHeaderIsCompaction
+
+	if sawCompactionInPane && !a.IsCompacting {
 		a.IsCompacting = true
 		a.PreCompactCtxPct = a.ContextPercent // snapshot before we zero it
 	}
-	if sawNonCompactionHeader {
+	// Only clear from pane-scraping if the BOTTOM-MOST header is non-Compaction.
+	// This prevents old headers in scrollback from falsely clearing the state.
+	if sawNonCompactionHeader && !sawCompactionDivider {
 		a.IsCompacting = false
 	}
 	// Context% drop: compaction prunes old context, so usage drops dramatically.
@@ -1601,13 +1649,10 @@ func parsePaneContentOpenCode(a *AgentLight, lines []string) {
 		a.IsCompacting = false
 	}
 
-	// Apply compaction override — agent is summarizing context, not doing real work.
-	// Matches Claude Code behavior (model.go:1133-1137).
-	if a.IsCompacting {
-		a.StatusText = "COMPACTING"
-		a.CurrentTool = ""
-		a.ContextPercent = 0
-	}
+	// NOTE: The compaction override (StatusText = "COMPACTING", ContextPercent = 0)
+	// is applied in the main poll loop AFTER applyToolEvents(), not here.
+	// This ensures event-based IsCompacting (set by applyToolEvents) takes effect
+	// in the same cycle rather than being delayed by one poll.
 
 	// HitLimit is terminal — clear stale status
 	if a.HitLimit {
@@ -1672,10 +1717,11 @@ func isBoxDrawingOnly(s string) bool {
 }
 
 // extractOpenCodeElapsedTime extracts the task name and elapsed time from an OpenCode ▣ line.
-// The ▣ line is ALWAYS present (static chrome). "Build" and "Plan" are standard modes
-// that are noise — we suppress them. Other task names like "Compaction" are meaningful.
+// The ▣ line is ALWAYS present (static chrome). "Build", "Plan", and "Compaction" are
+// standard modes that are noise — we suppress them. Compaction state is tracked separately
+// via IsCompacting. Other task names would be meaningful.
 // Input:  "▣  Build · claude-opus-4.6 · 2m 17s"    → "" (Build is noise)
-// Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s" → "Compaction · 1m 6s"
+// Input:  "▣  Compaction · claude-opus-4.6 · 1m 6s" → "" (Compaction is noise)
 // Input:  "▣  Build · claude-opus-4.6"               → "" (Build is noise)
 func extractOpenCodeElapsedTime(line string) string {
 	trimmed := strings.TrimSpace(line)
@@ -1692,9 +1738,10 @@ func extractOpenCodeElapsedTime(line string) string {
 	segments := strings.Split(rest, " · ")
 	taskName := strings.TrimSpace(segments[0])
 
-	// "Build" and "Plan" are standard OpenCode modes — not useful as status.
-	// Suppress them entirely so bead info can be the primary content.
-	if taskName == "Build" || taskName == "Plan" {
+	// "Build", "Plan", and "Compaction" are standard OpenCode modes — not useful
+	// as status. Suppress them so bead info can be the primary content.
+	// Compaction state is tracked separately via IsCompacting.
+	if taskName == "Build" || taskName == "Plan" || taskName == "Compaction" {
 		return ""
 	}
 
