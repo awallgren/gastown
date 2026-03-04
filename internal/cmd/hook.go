@@ -249,6 +249,9 @@ func runHook(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("detecting agent identity: %w", err)
 		}
 	}
+	// Normalize: strip trailing slash for consistent beads assignee matching.
+	// resolveSelfTarget returns "deacon/" but beads assignee should be "deacon".
+	agentID = strings.TrimSuffix(agentID, "/")
 
 	// Find town root - needed for bd routing and agent bead updates
 	townRoot, err := workspace.FindFromCwd()
@@ -468,7 +471,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("auto-detecting agent (use explicit argument): %w", err)
 		}
-		target = agentID
+		target = strings.TrimSuffix(agentID, "/")
 	}
 
 	// Find beads directory.
