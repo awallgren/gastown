@@ -141,7 +141,7 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 			return ErrAlreadyRunning
 		}
 
-		if err := t.KillSession(sessionID); err != nil {
+		if err := t.KillSessionWithProcesses(sessionID); err != nil {
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
 	}
@@ -327,6 +327,7 @@ func (m *Manager) Stop() error {
 		return ErrNotRunning
 	}
 
-	// Kill the tmux session
-	return t.KillSession(sessionID)
+	// Kill the tmux session and all descendant processes.
+	// Bare KillSession only sends SIGHUP which Node.js/opencode may ignore.
+	return t.KillSessionWithProcesses(sessionID)
 }
