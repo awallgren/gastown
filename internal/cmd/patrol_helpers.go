@@ -51,10 +51,14 @@ func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool
 		b = beads.New(cfg.BeadsDir)
 	}
 
+	// Normalize assignee: strip trailing slash for consistent matching.
+	// resolveSelfTarget returns "deacon/" but PatrolConfig uses "deacon".
+	normalizedAssignee := strings.TrimSuffix(cfg.Assignee, "/")
+
 	// Find hooked patrol beads for this agent
 	hookedBeads, listErr := b.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
-		Assignee: cfg.Assignee,
+		Assignee: normalizedAssignee,
 		Priority: -1,
 	})
 	if listErr != nil {
@@ -167,7 +171,7 @@ func burnPreviousPatrolWisps(cfg PatrolConfig) {
 	// Find all hooked patrol beads for this agent
 	hookedBeads, err := b.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
-		Assignee: cfg.Assignee,
+		Assignee: strings.TrimSuffix(cfg.Assignee, "/"),
 		Priority: -1,
 	})
 	if err != nil {
@@ -295,7 +299,9 @@ func autoSpawnPatrol(cfg PatrolConfig) (string, error) {
 	}
 
 	// Hook the wisp to the agent so gt mol status sees it
-	if err := BdCmd("update", patrolID, "--status=hooked", "--assignee="+cfg.Assignee).
+	// Normalize assignee: strip trailing slash for consistent matching
+	hookAssignee := strings.TrimSuffix(cfg.Assignee, "/")
+	if err := BdCmd("update", patrolID, "--status=hooked", "--assignee="+hookAssignee).
 		WithAutoCommit().
 		WithBeadsDir(resolvedBeadsDir).
 		Dir(cfg.BeadsDir).
