@@ -74,6 +74,7 @@ result
 
 # Opencode
 .opencode/
+.winnow/
 
 # Gas Town (added by gt)
 __pycache__/

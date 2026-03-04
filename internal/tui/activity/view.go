@@ -28,6 +28,7 @@ var (
 	colorCold        = lipgloss.AdaptiveColor{Light: "#5c6166", Dark: "#3e4449"} // dark gray
 	colorRateLimited = lipgloss.AdaptiveColor{Light: "#d97020", Dark: "#e08840"} // muted orange
 	colorWaiting     = lipgloss.AdaptiveColor{Light: "#d04040", Dark: "#e05555"} // red (demands attention)
+	colorCompacting  = lipgloss.AdaptiveColor{Light: "#8b3fbf", Dark: "#b070e0"} // purple — transient maintenance
 	colorTitle       = lipgloss.AdaptiveColor{Light: "#2e7eb3", Dark: "#6dafda"} // soft blue
 	colorDim         = ui.ColorMuted
 	colorBorder      = lipgloss.AdaptiveColor{Light: "#828c99", Dark: "#404850"}
@@ -72,6 +73,10 @@ var (
 				Foreground(colorWaiting).
 				Bold(true)
 
+	nameCompactingStyle = lipgloss.NewStyle().
+				Foreground(colorCompacting).
+				Bold(true)
+
 	barActiveStyle = lipgloss.NewStyle().
 			Foreground(colorActive).
 			Bold(true)
@@ -102,6 +107,10 @@ var (
 	barWaitingDimStyle = lipgloss.NewStyle().
 				Foreground(colorWaiting)
 
+	barCompactingStyle = lipgloss.NewStyle().
+				Foreground(colorCompacting).
+				Bold(true)
+
 	statActiveStyle = lipgloss.NewStyle().
 			Foreground(colorActive).
 			Bold(true)
@@ -129,6 +138,9 @@ var (
 	statusWaitingStyle = lipgloss.NewStyle().
 				Foreground(colorWaiting).
 				Bold(true)
+
+	statusCompactingStyle = lipgloss.NewStyle().
+				Foreground(colorCompacting)
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(colorDim)
@@ -245,6 +257,12 @@ func (m *Model) renderLight(a *AgentLight) string {
 		nameStyle = nameWaitingStyle
 	}
 
+	// Compacting overrides level-based name style — it's a transient
+	// maintenance state that can happen at any activity level.
+	if a.IsCompacting {
+		nameStyle = nameCompactingStyle
+	}
+
 	// Truncate long names
 	displayName := a.Name
 	if len(displayName) > 10 {
@@ -278,9 +296,10 @@ func (m *Model) renderLight(a *AgentLight) string {
 
 	// Priority order:
 	//   1. Warning states (HIT LIMIT, NEEDS HUMAN) — always override
-	//   2. Bead context as primary content (tool appended if active)
-	//   3. Active tool alone (no bead info available)
-	//   4. Fallback to StatusText or level-based defaults
+	//   2. Compacting — transient maintenance, overrides normal work display
+	//   3. Bead context as primary content (tool appended if active)
+	//   4. Active tool alone (no bead info available)
+	//   5. Fallback to StatusText or level-based defaults
 	switch {
 	case a.Level == LevelHitLimit:
 		statusStr = "⚠ HIT LIMIT"
@@ -294,6 +313,9 @@ func (m *Model) renderLight(a *AgentLight) string {
 			statusStr += " · " + a.WaitingReason
 		}
 		stStyle = statusWaitingStyle
+	case a.IsCompacting:
+		statusStr = "COMPACTING"
+		stStyle = statusCompactingStyle
 	case beadCtx != "":
 		switch a.Level {
 		case LevelCold:
@@ -464,6 +486,11 @@ func (m *Model) renderLight(a *AgentLight) string {
 
 // renderBar renders the activity dot indicator for an agent.
 func (m *Model) renderBar(a *AgentLight) string {
+	// Compacting overrides level-based bar — steady purple dot
+	if a.IsCompacting {
+		return barCompactingStyle.Render(dotActive)
+	}
+
 	switch a.Level {
 	case LevelActive:
 		// Blink between bright and dim for active agents
