@@ -71,5 +71,7 @@ result
 # bv (beads viewer) local config and caches
 .bv/
 
+.winnow/
+
 # Gas Town (added by gt)
 __pycache__/
