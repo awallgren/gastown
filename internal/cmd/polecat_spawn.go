@@ -409,8 +409,8 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
 	pane, err := getSessionPane(s.SessionName)
 	if err != nil {
-		// Session likely died — clean up the tmux session so it doesn't block re-sling
-		_ = t.KillSession(s.SessionName)
+		// Session likely died — clean up the tmux session and any lingering processes
+		_ = t.KillSessionWithProcesses(s.SessionName)
 		return "", fmt.Errorf("getting pane for %s (session likely died during startup): %w", s.SessionName, err)
 	}
 

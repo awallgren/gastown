@@ -127,8 +127,11 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 			return ErrAlreadyRunning
 		}
 		// Zombie - tmux alive but agent dead. Kill and recreate.
+		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+		// Bare KillSession only sends SIGHUP which Node.js/opencode may ignore,
+		// leaving orphaned processes that accumulate over patrol cycles.
 		_, _ = fmt.Fprintln(m.output, "⚠ Detected zombie session (tmux alive, agent dead). Recreating...")
-		if err := t.KillSession(sessionID); err != nil {
+		if err := t.KillSessionWithProcesses(sessionID); err != nil {
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
 	}
@@ -319,8 +322,9 @@ func (m *Manager) Stop() error {
 		return ErrNotRunning
 	}
 
-	// Kill the tmux session
-	return t.KillSession(sessionID)
+	// Kill the tmux session and all descendant processes.
+	// Bare KillSession only sends SIGHUP which Node.js/opencode may ignore.
+	return t.KillSessionWithProcesses(sessionID)
 }
 
 // Queue returns the current merge queue.
