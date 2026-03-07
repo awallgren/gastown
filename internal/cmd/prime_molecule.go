@@ -106,6 +106,36 @@ func showMoleculeExecutionPrompt(workDir, moleculeID string) {
 	}
 }
 
+// buildVarMap constructs a variable substitution map from formula defaults
+// and runtime override strings. Runtime overrides (from ExtraVars or
+// loadRigCommandVars) take precedence over formula defaults.
+// The overrides slice contains "key=value" strings.
+func buildVarMap(f *formula.Formula, overrides []string) map[string]string {
+	vars := make(map[string]string)
+	// Start with formula defaults
+	for name, v := range f.Vars {
+		if v.Default != "" {
+			vars[name] = v.Default
+		}
+	}
+	// Apply runtime overrides
+	for _, kv := range overrides {
+		if idx := strings.IndexByte(kv, '='); idx >= 0 {
+			vars[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	return vars
+}
+
+// substituteVars replaces all {{key}} placeholders in text with their values
+// from the vars map. Unresolved placeholders are left as-is.
+func substituteVars(text string, vars map[string]string) string {
+	for k, v := range vars {
+		text = strings.ReplaceAll(text, "{{"+k+"}}", v)
+	}
+	return text
+}
+
 // showFormulaSteps renders the formula steps inline in the prime output.
 // Agents read these steps instead of materializing them as wisp rows.
 // The label parameter customizes the section header (e.g., "Patrol Steps", "Work Steps").
@@ -217,6 +247,7 @@ func extractFormulaVar(formulaVars, key string) string {
 	}
 	return ""
 }
+
 // truncateDescription truncates a multi-line description to a single line summary.
 func truncateDescription(desc string, maxLen int) string {
 	// Take just the first line
@@ -263,7 +294,6 @@ func outputMoleculeContext(ctx RoleContext) {
 	// No child-based tracking needed.
 }
 
-
 // outputDeaconPatrolContext shows patrol molecule status for the Deacon.
 // Deacon uses wisps (Wisp:true issues in main .beads/) for patrol cycles.
 // Deacon is a town-level role, so it uses town root beads (not rig beads).
@@ -276,19 +306,19 @@ func outputDeaconPatrolContext(ctx RoleContext) {
 	}
 
 	cfg := PatrolConfig{
-		RoleName:        "deacon",
-		PatrolMolName:   constants.MolDeaconPatrol,
-		BeadsDir:        ctx.TownRoot, // Town-level role uses town root beads
-		Assignee:        "deacon",
-		HeaderEmoji:     "🔄",
-		HeaderTitle:     "Patrol Status (Wisp-based)",
+		RoleName:      "deacon",
+		PatrolMolName: constants.MolDeaconPatrol,
+		BeadsDir:      ctx.TownRoot, // Town-level role uses town root beads
+		Assignee:      "deacon",
+		HeaderEmoji:   "🔄",
+		HeaderTitle:   "Patrol Status (Wisp-based)",
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
 			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Deacon patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
 		},
 	}
 	outputPatrolContext(cfg)
-	showFormulaSteps(constants.MolDeaconPatrol, "Patrol Steps")
+	showFormulaSteps(constants.MolDeaconPatrol, "Patrol Steps", nil)
 }
 
 // outputWitnessPatrolContext shows patrol molecule status for the Witness.
@@ -299,19 +329,19 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 		return
 	}
 	cfg := PatrolConfig{
-		RoleName:        "witness",
-		PatrolMolName:   constants.MolWitnessPatrol,
-		BeadsDir:        ctx.WorkDir,
-		Assignee:        ctx.Rig + "/witness",
-		HeaderEmoji:     constants.EmojiWitness,
-		HeaderTitle:     "Witness Patrol Status",
+		RoleName:      "witness",
+		PatrolMolName: constants.MolWitnessPatrol,
+		BeadsDir:      ctx.WorkDir,
+		Assignee:      ctx.Rig + "/witness",
+		HeaderEmoji:   constants.EmojiWitness,
+		HeaderTitle:   "Witness Patrol Status",
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
 			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Witness patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
 		},
 	}
 	outputPatrolContext(cfg)
-	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps")
+	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", nil)
 }
 
 // outputRefineryPatrolContext shows patrol molecule status for the Refinery.
@@ -322,13 +352,13 @@ func outputRefineryPatrolContext(ctx RoleContext) {
 		return
 	}
 	cfg := PatrolConfig{
-		RoleName:        "refinery",
-		PatrolMolName:   constants.MolRefineryPatrol,
-		BeadsDir:        ctx.WorkDir,
-		Assignee:        ctx.Rig + "/refinery",
-		HeaderEmoji:     "🔧",
-		HeaderTitle:     "Refinery Patrol Status",
-		ExtraVars:       buildRefineryPatrolVars(ctx),
+		RoleName:      "refinery",
+		PatrolMolName: constants.MolRefineryPatrol,
+		BeadsDir:      ctx.WorkDir,
+		Assignee:      ctx.Rig + "/refinery",
+		HeaderEmoji:   "🔧",
+		HeaderTitle:   "Refinery Patrol Status",
+		ExtraVars:     buildRefineryPatrolVars(ctx),
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
 			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Refinery patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
