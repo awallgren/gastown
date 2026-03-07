@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -463,7 +464,7 @@ type sessionInfo struct {
 // pollSessions queries tmux for all Gas Town session activity.
 func (m *Model) pollSessions() tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}|#{window_activity}|#{session_created}")
+		cmd := tmux.BuildCommand("list-sessions", "-F", "#{session_name}|#{window_activity}|#{session_created}")
 		out, err := cmd.Output()
 		if err != nil {
 			return sessionsMsg{sessions: nil}
@@ -522,11 +523,16 @@ func (m *Model) pollTick() tea.Cmd {
 func batchCapturePanes(sessions []sessionInfo) map[string][]string {
 	// Build a shell script that captures each pane with a delimiter.
 	// Delimiter format: ===PANE:sessionName===
+	// Include the tmux socket flag so we target the town server, not the default.
+	socketFlag := ""
+	if sock := tmux.GetDefaultSocket(); sock != "" {
+		socketFlag = fmt.Sprintf(" -L %s", sock)
+	}
 	var script strings.Builder
 	for _, s := range sessions {
 		// Session names are safe (alphanumeric + hyphens from our naming convention)
 		fmt.Fprintf(&script, "echo '===PANE:%s==='\n", s.name)
-		fmt.Fprintf(&script, "tmux capture-pane -t '%s' -p -S -10 2>/dev/null\n", s.name)
+		fmt.Fprintf(&script, "tmux%s capture-pane -t '%s' -p -S -10 2>/dev/null\n", socketFlag, s.name)
 	}
 
 	cmd := exec.Command("sh", "-c", script.String())
@@ -2242,7 +2248,12 @@ func (m *Model) openTerminalWithTmuxAttach(sessionName string) {
 		return
 	}
 
-	attachCmd := fmt.Sprintf("%s attach -t %s", tmuxPath, sessionName)
+	// Build the tmux attach command with the correct socket.
+	socketArgs := ""
+	if sock := tmux.GetDefaultSocket(); sock != "" {
+		socketArgs = fmt.Sprintf(" -L %s", sock)
+	}
+	attachCmd := fmt.Sprintf("%s%s attach -t %s", tmuxPath, socketArgs, sessionName)
 
 	// Try iTerm2 first (very common on macOS for dev)
 	// Request 192x60 so the agent TUI (especially OpenCode's sidebar) renders fully.
@@ -2859,7 +2870,7 @@ func deriveSessionNameFromComponents(prefix, role, name string) string {
 // fetchAgentDetails fetches additional info for hover tooltip.
 func (m *Model) fetchAgentDetails(a *AgentLight) {
 	// Capture last 20 lines to extract bead IDs and recent activity
-	cmd := exec.Command("tmux", "capture-pane", "-t", a.SessionName, "-p", "-S", "-20")
+	cmd := tmux.BuildCommand("capture-pane", "-t", a.SessionName, "-p", "-S", "-20")
 	out, err := cmd.Output()
 	if err != nil {
 		return
@@ -2887,7 +2898,7 @@ func (m *Model) fetchAgentDetails(a *AgentLight) {
 // Returns "" (unknown) if GT_AGENT is not set — caller should use
 // detectAgentTypeFromPane() on subsequent polls to identify from pane content.
 func detectAgentType(sessionName string) string {
-	cmd := exec.Command("tmux", "show-environment", "-t", sessionName, "GT_AGENT")
+	cmd := tmux.BuildCommand("show-environment", "-t", sessionName, "GT_AGENT")
 	out, err := cmd.Output()
 	if err != nil {
 		return "" // GT_AGENT not set — unknown, detect from pane content later
