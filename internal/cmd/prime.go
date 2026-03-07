@@ -892,6 +892,8 @@ func outputMoleculeWorkflow(ctx RoleContext, attachment *beads.AttachmentFields)
 	}
 
 	// Show inline formula steps from the embedded binary (root-only: no child wisps to query).
+	// Resolve formula variables from rig command settings so agents see actual
+	// commands (e.g., "./gradlew test") instead of raw {{test_command}} placeholders.
 	if attachment.AttachedFormula != "" {
 		showFormulaStepsFull(attachment.AttachedFormula, ctx.TownRoot, ctx.Rig, strings.Split(attachment.FormulaVars, "\n"))
 		fmt.Println()

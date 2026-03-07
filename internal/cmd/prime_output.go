@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/cli"
 	"encoding/json"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/cli"
 	"io"
 	"os"
 	"path/filepath"
