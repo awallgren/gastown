@@ -1325,12 +1325,26 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 	}
 
 	// Extract sidebar content before truncation.
+	// Track which todo we're currently accumulating continuation lines for,
+	// since items wrap across multiple lines in the sidebar (e.g., a long
+	// todo like "Run full test suite, verify no new failures beyond 15 known"
+	// renders as two lines in a ~42-column sidebar).
+	type todoAccum int
+	const (
+		accumNone       todoAccum = iota
+		accumInProgress           // continuation lines append to inProgressTodo
+		accumPending              // continuation lines append to last pendingTodos entry
+	)
+	currentAccum := accumNone
+
 	for _, line := range lines {
 		if len(line) <= sidebarCol {
+			currentAccum = accumNone
 			continue
 		}
 		sidebarText := strings.TrimSpace(line[sidebarCol:])
 		if sidebarText == "" {
+			currentAccum = accumNone
 			continue
 		}
 
@@ -1340,7 +1354,9 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 			todoText := strings.TrimSpace(strings.TrimPrefix(sidebarText, "[•]"))
 			if todoText != "" && info.inProgressTodo == "" {
 				info.inProgressTodo = todoText
+				currentAccum = accumInProgress
 			}
+			continue
 		}
 
 		// [ ] pending todo items — upcoming steps.
@@ -1348,8 +1364,34 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 			todoText := strings.TrimSpace(strings.TrimPrefix(sidebarText, "[ ]"))
 			if todoText != "" {
 				info.pendingTodos = append(info.pendingTodos, todoText)
+				currentAccum = accumPending
 			}
+			continue
 		}
+
+		// [✓] completed todo — not accumulated, but resets continuation.
+		if strings.HasPrefix(sidebarText, "[✓]") {
+			currentAccum = accumNone
+			continue
+		}
+
+		// Continuation line: append to the current todo if we're accumulating.
+		// Sidebar continuation lines are indented text without a bracket prefix.
+		// Stop accumulating if we hit a non-todo sidebar element.
+		if currentAccum != accumNone && !isSidebarStructuralLine(sidebarText) {
+			switch currentAccum {
+			case accumInProgress:
+				info.inProgressTodo += " " + sidebarText
+			case accumPending:
+				if len(info.pendingTodos) > 0 {
+					info.pendingTodos[len(info.pendingTodos)-1] += " " + sidebarText
+				}
+			}
+			continue
+		}
+
+		// Non-continuation sidebar content — reset accumulator.
+		currentAccum = accumNone
 
 		// N% used — context usage.
 		if pct := extractOpenCodeSidebarContextPercent(line); pct > 0 {
@@ -1372,6 +1414,27 @@ func extractAndStripSidebar(lines []string) ([]string, sidebarInfo) {
 		}
 	}
 	return result, info
+}
+
+// isSidebarStructuralLine returns true if the text is a known sidebar
+// structural element (not a todo continuation line). Used to stop
+// accumulating multi-line todo text when we hit a section header,
+// context info, or other non-todo sidebar content.
+func isSidebarStructuralLine(text string) bool {
+	// Section headers and labels
+	if strings.HasPrefix(text, "▼ ") || strings.HasPrefix(text, "▶ ") {
+		return true
+	}
+	// Context/token/cost info
+	if strings.HasSuffix(text, "tokens") || strings.HasSuffix(text, "used") ||
+		strings.HasSuffix(text, "spent") || strings.HasPrefix(text, "Context") {
+		return true
+	}
+	// LSP status lines
+	if strings.HasPrefix(text, "LSP") || strings.HasPrefix(text, "• ") {
+		return true
+	}
+	return false
 }
 
 // parsePaneContentOpenCode extracts status signals from an OpenCode TUI pane.
