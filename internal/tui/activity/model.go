@@ -126,7 +126,8 @@ type Model struct {
 	patrolCache   map[string]patrolCacheEntry // "rig/role" -> cached patrol summary
 
 	// Poll configuration
-	pollInterval time.Duration // how often to poll tmux sessions (default 3s)
+	pollInterval        time.Duration // how often to poll tmux sessions (default 3s)
+	lastRegistryRefresh time.Time     // when we last re-read rigs.json for new rigs
 
 	// Plugin event consumption (for non-Claude agents like OpenCode)
 	recentToolEvents []toolEvent // recent tool_started events (< 15s old)
@@ -179,10 +180,11 @@ func NewModel(pollInterval time.Duration) *Model {
 	}
 
 	return &Model{
-		agents:       make([]*AgentLight, 0),
-		townRoot:     townRoot,
-		townName:     townName,
-		pollInterval: pollInterval,
+		agents:              make([]*AgentLight, 0),
+		townRoot:            townRoot,
+		townName:            townName,
+		pollInterval:        pollInterval,
+		lastRegistryRefresh: time.Now(),
 	}
 }
 
@@ -461,6 +463,31 @@ type sessionInfo struct {
 	paneLines []string // captured pane content for status extraction
 }
 
+// registryRefreshInterval controls how often gt top re-reads rigs.json to
+// detect newly added rigs. Reading a small JSON file every 10s is negligible.
+const registryRefreshInterval = 10 * time.Second
+
+// refreshRegistry re-reads rigs.json and updates the prefix registry.
+// If the set of known rigs has changed, the rigBeadsDirs cache is
+// invalidated so new rig beads directories are discovered on the next poll.
+func (m *Model) refreshRegistry() {
+	oldRigs := session.DefaultRegistry().AllRigs()
+	_ = session.InitRegistry(m.townRoot)
+	m.lastRegistryRefresh = time.Now()
+
+	newRigs := session.DefaultRegistry().AllRigs()
+	if len(newRigs) != len(oldRigs) {
+		m.rigBeadsDirs = nil // force re-discovery
+		return
+	}
+	for rig := range newRigs {
+		if _, ok := oldRigs[rig]; !ok {
+			m.rigBeadsDirs = nil // force re-discovery
+			return
+		}
+	}
+}
+
 // pollSessions queries tmux for all Gas Town session activity.
 func (m *Model) pollSessions() tea.Cmd {
 	return func() tea.Msg {
@@ -605,6 +632,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.pollTick()
 
 	case pollMsg:
+		// Periodically refresh the prefix registry to detect newly added rigs.
+		// Without this, rigs added after gt top starts would be invisible
+		// because IsKnownSession would not recognize their session prefixes.
+		if m.townRoot != "" && time.Since(m.lastRegistryRefresh) >= registryRefreshInterval {
+			m.refreshRegistry()
+		}
 		return m, m.pollSessions()
 	}
 
