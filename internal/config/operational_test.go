@@ -283,6 +283,36 @@ func TestMailThresholds_Defaults(t *testing.T) {
 	if got := mail.MaxConcurrentAckOpsV(); got != DefaultMailMaxConcurrentAcks {
 		t.Errorf("MaxConcurrentAckOps: got %v, want %v", got, DefaultMailMaxConcurrentAcks)
 	}
+	if got := mail.ReplyReminderDelayD(); got != DefaultMailReplyReminderDelay {
+		t.Errorf("ReplyReminderDelay: got %v, want %v", got, DefaultMailReplyReminderDelay)
+	}
+}
+
+func TestMailThresholds_ReplyReminderDelayOverride(t *testing.T) {
+	t.Parallel()
+
+	op := &OperationalConfig{
+		Mail: &MailThresholds{
+			ReplyReminderDelay: "1m",
+		},
+	}
+	if got := op.GetMailConfig().ReplyReminderDelayD(); got != time.Minute {
+		t.Errorf("ReplyReminderDelay override: got %v, want 1m", got)
+	}
+}
+
+func TestMailThresholds_ReplyReminderDelayDisabled(t *testing.T) {
+	t.Parallel()
+
+	// "0s" disables reply reminders.
+	op := &OperationalConfig{
+		Mail: &MailThresholds{
+			ReplyReminderDelay: "0s",
+		},
+	}
+	if got := op.GetMailConfig().ReplyReminderDelayD(); got != 0 {
+		t.Errorf("ReplyReminderDelay disabled: got %v, want 0", got)
+	}
 }
 
 func TestWebThresholds_Overrides(t *testing.T) {
