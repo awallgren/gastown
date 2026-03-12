@@ -2357,10 +2357,10 @@ func FindBrokenWorkspaces(townRoot string) []BrokenWorkspace {
 	// fall back to filesystem-only checks (previous behavior).
 	var servedDBs map[string]bool
 	if running, _, _ := IsRunning(townRoot); running {
-		if served, _, err := VerifyDatabases(townRoot); err == nil {
+		if served, _, err := VerifyDatabasesWithRetry(townRoot, 3); err == nil {
 			servedDBs = make(map[string]bool, len(served))
 			for _, db := range served {
-				servedDBs[db] = true
+				servedDBs[strings.ToLower(db)] = true
 			}
 		}
 	}
@@ -2432,7 +2432,7 @@ func checkWorkspace(townRoot, rigName, beadsDir string, servedDBs map[string]boo
 	// not be served if the server was started from a different data
 	// directory or needs a restart after migration.
 	if existsOnDisk {
-		if servedDBs != nil && !servedDBs[dbName] {
+		if servedDBs != nil && !servedDBs[strings.ToLower(dbName)] {
 			return &BrokenWorkspace{
 				RigName:      rigName,
 				BeadsDir:     beadsDir,
