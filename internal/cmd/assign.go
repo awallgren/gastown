@@ -156,8 +156,10 @@ func runAssign(_ *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Assigned %s to %s — %q\n", style.Bold.Render("✓"), beadID, agentID, title)
 
-	// Step 5: Optionally nudge the agent
-	if assignNudge {
+	// Step 5: Nudge or warn
+	if !assignNudge {
+		fmt.Printf("  %s Agent won't be notified (use --nudge to wake them)\n", style.Dim.Render("ℹ"))
+	} else {
 		nudgeMsg := fmt.Sprintf("New work on your hook: %s", title)
 		nudgeCmd := exec.Command("gt", "nudge", agentID, "-m", nudgeMsg)
 		nudgeCmd.Stderr = os.Stderr
