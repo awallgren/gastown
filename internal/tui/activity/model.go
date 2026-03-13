@@ -688,6 +688,31 @@ func (m *Model) updateAgents(sessions []sessionInfo) {
 				newCreated := time.Unix(s.created, 0)
 				if !newCreated.Equal(agent.SessionCreated) {
 					agent.SessionCreated = newCreated
+					// Reset all sticky fields from the previous session
+					agent.ContextPercent = 0
+					agent.TokenCount = 0
+					agent.SessionLimitPct = 0
+					agent.SessionLimitReset = ""
+					agent.IsCompacting = false
+					agent.PreCompactCtxPct = 0
+					agent.PrevStatusText = ""
+					agent.CurrentTool = ""
+					agent.StatusText = ""
+					agent.LastPatrol = ""
+					agent.WorkBeadID = ""
+					agent.WorkBeadTitle = ""
+					agent.FormulaName = ""
+					agent.StepCurrent = ""
+					agent.StepsDone = 0
+					agent.StepsTotal = 0
+					agent.AgentState = ""
+					agent.AgentType = "" // force re-detection
+					agent.HitLimit = false
+					agent.LimitResetInfo = ""
+					agent.RateLimited = false
+					agent.WaitingForHuman = false
+					agent.WaitingReason = ""
+					agent.RecentOutput = ""
 				}
 			}
 		}
@@ -2482,10 +2507,17 @@ func (m *Model) pollBeadsWork() {
 				}
 			}
 
-			// Determine which bead ID to fetch
-			hookBeadID := issue.HookBead
-			if hookBeadID == "" && fields != nil {
-				hookBeadID = fields.HookBead
+			// Determine which bead ID to fetch — but only if the agent is
+			// actively working. When agent_state is idle/done/nuked the
+			// hook_bead field is stale (gt done doesn't clear it) and
+			// showing it would display ancient work descriptions.
+			hookBeadID := ""
+			agentState := beads.AgentState(agent.AgentState)
+			if agentState.IsActive() {
+				hookBeadID = issue.HookBead
+				if hookBeadID == "" && fields != nil {
+					hookBeadID = fields.HookBead
+				}
 			}
 
 			match := agentBeadMatch{
@@ -2496,8 +2528,8 @@ func (m *Model) pollBeadsWork() {
 				hookBeadID: hookBeadID,
 			}
 
-			// Refinery agents use ActiveMR instead of HookBead
-			if hookBeadID == "" && role == "refinery" && fields != nil && fields.ActiveMR != "" {
+			// Refinery agents use ActiveMR instead of HookBead (only when active)
+			if hookBeadID == "" && role == "refinery" && agentState.IsActive() && fields != nil && fields.ActiveMR != "" {
 				match.activeMR = fields.ActiveMR
 				beadIDsToFetch[fields.ActiveMR] = true
 			} else if hookBeadID != "" {
@@ -2562,8 +2594,9 @@ func (m *Model) pollBeadsWork() {
 			}
 
 			hookBead := fetchedBeads[match.hookBeadID]
-			if hookBead == nil {
-				agent.WorkBeadID = match.hookBeadID
+			if hookBead == nil || beads.IssueStatus(hookBead.Status).IsTerminal() {
+				// Hook bead missing or closed — don't display stale work info
+				agent.WorkBeadID = ""
 				agent.WorkBeadTitle = ""
 				agent.FormulaName = ""
 				agent.StepCurrent = ""
