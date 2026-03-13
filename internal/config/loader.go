@@ -2290,17 +2290,21 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
 	// Record agent identity for session detection (zombie checks, handoff).
-	// When an explicit override is set, use it directly. Otherwise, derive the
-	// agent name from the resolved RuntimeConfig so that IsAgentAlive can find
-	// the correct process names. Without this, sessions started via role config
-	// (e.g., default-agent=opencode-gt) have no GT_AGENT, causing IsAgentAlive
-	// to fall back to Claude's process names and misidentify them as zombies.
+	// When an explicit override is set, use it directly. Otherwise, prefer the
+	// resolved agent name (e.g., "opencode-opus") which preserves the custom
+	// agent alias from role_agents config. Fall back to Provider or Command
+	// only when ResolvedAgent is not available.
 	//
-	// Explicit override takes priority; fall back to resolved agent name.
+	// Explicit override takes priority; then resolved agent name; then derivation.
 	// Skip Claude (the default) since legacy sessions expect no GT_AGENT and
 	// the fallback already handles Claude's process names correctly.
 	if agentOverride != "" {
 		resolvedEnv["GT_AGENT"] = agentOverride
+	} else if rc.ResolvedAgent != "" && !isClaudeAgent(rc) {
+		// Prefer resolved agent name — preserves custom aliases like
+		// "opencode-opus" or "opencode-sonnet" from role_agents config,
+		// so gt top can distinguish model variants of the same runtime.
+		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
 	} else if rc.Provider != "" && !isClaudeAgent(rc) {
 		resolvedEnv["GT_AGENT"] = rc.Provider
 	} else if rc.Command != "" && !isClaudeAgent(rc) {
