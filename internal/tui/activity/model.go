@@ -2724,11 +2724,11 @@ func (m *Model) fetchLastPatrolSummaryCached(b *beads.Beads, rig, role string) s
 func fetchLastPatrolSummary(b *beads.Beads, rig, role string) string {
 	assignee := patrolAssignee(rig, role)
 	closed, err := b.List(beads.ListOptions{
-		Status:       "closed",
-		Assignee:     assignee,
-		Priority:     -1,
-		Limit:        5,
-		IncludeInfra: true, // patrol wisps are ephemeral beads
+		Status:    "closed",
+		Assignee:  assignee,
+		Priority:  -1,
+		Limit:     5,
+		Ephemeral: true, // patrol wisps are ephemeral beads
 	})
 	if err != nil || len(closed) == 0 {
 		return ""
