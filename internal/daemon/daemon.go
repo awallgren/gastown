@@ -55,6 +55,7 @@ type Daemon struct {
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
 	krcPruner     *KRCPruner
+	observer      *TmuxObserver
 
 	// Mass death detection: track recent session deaths
 	deathsMu     sync.Mutex
@@ -372,6 +373,15 @@ func (d *Daemon) Run() error {
 		} else {
 			d.logger.Println("KRC pruner started")
 		}
+	}
+
+	// Start tmux observer for agent activity event emission
+	observer := NewTmuxObserver(d.config.TownRoot, d.tmux, d.logger.Printf)
+	d.observer = observer
+	if err := d.observer.Start(); err != nil {
+		d.logger.Printf("Warning: failed to start tmux observer: %v", err)
+	} else {
+		d.logger.Println("Tmux observer started")
 	}
 
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
@@ -1088,7 +1098,6 @@ func (d *Daemon) checkDeaconHeartbeat() {
 	}
 }
 
-
 // ensureWitnessesRunning ensures witnesses are running for configured rigs.
 // Called on each heartbeat to maintain witness patrol loops.
 // Respects the rigs filter in daemon.json patrol config.
@@ -1477,7 +1486,7 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 	// Check rig bead labels (global/synced docked status)
 	// This is the persistent docked state set by 'gt rig dock'
 	rigPath := filepath.Join(d.config.TownRoot, rigName)
-	
+
 	// Try to get prefix from rig config.json, fall back to rigs.json registry
 	var prefix string
 	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
@@ -1486,7 +1495,7 @@ func (d *Daemon) isRigOperational(rigName string) (bool, string) {
 		// Fall back to registry (mayor/rigs.json) when config.json is missing
 		prefix = config.GetRigPrefix(d.config.TownRoot, rigName)
 	}
-	
+
 	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
 	rigBeadsDir := beads.ResolveBeadsDir(rigPath)
 	bd := beads.NewWithBeadsDir(rigPath, rigBeadsDir)
@@ -1552,6 +1561,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.krcPruner != nil {
 		d.krcPruner.Stop()
 		d.logger.Println("KRC pruner stopped")
+	}
+
+	// Stop tmux observer
+	if d.observer != nil {
+		d.observer.Stop()
+		d.logger.Println("Tmux observer stopped")
 	}
 
 	// Push Dolt remotes before stopping the server (if patrol is enabled)
