@@ -61,6 +61,7 @@ type Daemon struct {
 	beadsStores   map[string]beadsdk.Storage
 	doltServer    *DoltServerManager
 	krcPruner     *KRCPruner
+	observer      *TmuxObserver
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
@@ -450,6 +451,15 @@ func (d *Daemon) Run() (err error) {
 		} else {
 			d.logger.Println("KRC pruner started")
 		}
+	}
+
+	// Start tmux observer for agent activity event emission
+	observer := NewTmuxObserver(d.config.TownRoot, d.tmux, d.logger.Printf)
+	d.observer = observer
+	if err := d.observer.Start(); err != nil {
+		d.logger.Printf("Warning: failed to start tmux observer: %v", err)
+	} else {
+		d.logger.Println("Tmux observer started")
 	}
 
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
@@ -1928,6 +1938,12 @@ func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return
 	if d.krcPruner != nil {
 		d.krcPruner.Stop()
 		d.logger.Println("KRC pruner stopped")
+	}
+
+	// Stop tmux observer
+	if d.observer != nil {
+		d.observer.Stop()
+		d.logger.Println("Tmux observer stopped")
 	}
 
 	// Push Dolt remotes before stopping the server (if patrol is enabled)

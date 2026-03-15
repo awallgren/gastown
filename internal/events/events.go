@@ -83,6 +83,15 @@ const (
 	// Compaction events (emitted by OpenCode plugin for gt top)
 	TypeCompactionStarted  = "compaction_started"  // Agent context compaction began
 	TypeCompactionFinished = "compaction_finished" // Agent context compaction finished
+
+	// Bead lifecycle events (emitted by bd CLI)
+	TypeBeadCreated = "bead_created" // Issue created via bd create
+	TypeBeadUpdated = "bead_updated" // Issue updated via bd update
+	TypeBeadClosed  = "bead_closed"  // Issue closed via bd close
+
+	// Observation events (emitted by daemon tmux observer)
+	TypeAgentObservation = "agent_observation" // Per-agent activity snapshot
+	TypeStateSnapshot    = "state_snapshot"    // Full agent roster checkpoint
 )
 
 // EventsFile is the name of the raw events log.
@@ -95,6 +104,20 @@ func Log(eventType, actor string, payload map[string]interface{}, visibility str
 	event := Event{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Source:     "gt",
+		Type:       eventType,
+		Actor:      actor,
+		Payload:    payload,
+		Visibility: visibility,
+	}
+	return write(event)
+}
+
+// LogWithSource writes an event with a custom source to the events log.
+// Used by components that aren't the gt CLI (e.g., the daemon observer).
+func LogWithSource(source, eventType, actor string, payload map[string]interface{}, visibility string) error {
+	event := Event{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Source:     source,
 		Type:       eventType,
 		Actor:      actor,
 		Payload:    payload,
@@ -399,4 +422,50 @@ func AgentIdlePayload(session string) map[string]interface{} {
 		p["session"] = session
 	}
 	return p
+}
+
+// BeadPayload creates a payload for bead lifecycle events (created/updated/closed).
+// id: bead ID (e.g., "wp-abc123")
+// title: bead title
+// beadType: issue type (task, bug, feature, etc.)
+// priority: priority level (0-4)
+// status: current status
+func BeadPayload(id, title, beadType string, priority int, status string) map[string]interface{} {
+	p := map[string]interface{}{
+		"id":       id,
+		"title":    title,
+		"type":     beadType,
+		"priority": priority,
+		"status":   status,
+	}
+	return p
+}
+
+// AgentObservationPayload creates a payload for agent observation events.
+// session: tmux session name
+// name: agent display name
+// role: agent role (mayor, deacon, crew, polecat, witness, etc.)
+// rig: repository rig name
+// level: activity level (active, recent, warm, cool, cold, dead)
+// state: heartbeat state (working, idle, stuck) — empty if unknown
+func AgentObservationPayload(session, name, role, rig, level, state string) map[string]interface{} {
+	p := map[string]interface{}{
+		"session": session,
+		"name":    name,
+		"role":    role,
+		"rig":     rig,
+		"level":   level,
+	}
+	if state != "" {
+		p["state"] = state
+	}
+	return p
+}
+
+// StateSnapshotPayload creates a payload for state snapshot events.
+// agents: list of agent observation maps (one per active agent)
+func StateSnapshotPayload(agents []map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"agents": agents,
+	}
 }
