@@ -4164,6 +4164,86 @@ func TestEnsureAllMetadata_FallbackToDbName(t *testing.T) {
 	}
 }
 
+// TestEnsureAllMetadata_NoOscillation verifies that when two databases map to
+// the same rig (e.g. "gastown" and "gt" both map to rig "gastown" via
+// conflicting routes.jsonl/rigs.json entries), EnsureAllMetadata does not
+// oscillate the dolt_database value on repeated calls. (gas-ar0)
+func TestEnsureAllMetadata_NoOscillation(t *testing.T) {
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+
+	// Simulate two databases that both map to "gastown":
+	//   "gastown" — matched by default (db name == rig name)
+	//   "gt"      — matched via rigs.json prefix "gt"
+	setupDoltDB(t, dataDir, "gastown")
+	setupDoltDB(t, dataDir, "gt")
+	setupDoltDB(t, dataDir, "hq")
+
+	// rigs.json: gastown rig uses prefix "gt"
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsData := `{"version":1,"rigs":{"gastown":{"beads":{"prefix":"gt"}}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create beads dirs
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// First call: no existing metadata.json — whichever candidate wins is fine
+	_, errs := EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Fatalf("first EnsureAllMetadata errors: %v", errs)
+	}
+
+	// Read the value that was written
+	metaPath := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads", "metadata.json")
+	readDB := func() string {
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			t.Fatalf("reading metadata.json: %v", err)
+		}
+		var meta map[string]interface{}
+		if err := json.Unmarshal(data, &meta); err != nil {
+			t.Fatalf("parsing metadata.json: %v", err)
+		}
+		db, _ := meta["dolt_database"].(string)
+		return db
+	}
+
+	firstDB := readDB()
+	if firstDB == "" {
+		t.Fatal("dolt_database should be set after first call")
+	}
+
+	// Second call: must produce the same value (no oscillation)
+	_, errs = EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Fatalf("second EnsureAllMetadata errors: %v", errs)
+	}
+	secondDB := readDB()
+	if secondDB != firstDB {
+		t.Errorf("oscillation: first call wrote %q, second call wrote %q", firstDB, secondDB)
+	}
+
+	// Third call: still no change
+	_, errs = EnsureAllMetadata(townRoot)
+	if len(errs) > 0 {
+		t.Fatalf("third EnsureAllMetadata errors: %v", errs)
+	}
+	thirdDB := readDB()
+	if thirdDB != firstDB {
+		t.Errorf("oscillation: first call wrote %q, third call wrote %q", firstDB, thirdDB)
+	}
+}
+
 func TestCleanStaleSocket_RemovesStaleFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix sockets not applicable on Windows")
