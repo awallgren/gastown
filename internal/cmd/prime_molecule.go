@@ -306,6 +306,7 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 		fmt.Printf("\n⏸️  Rig %s is %s — skipping patrol wisp generation.\n", ctx.Rig, reason)
 		return
 	}
+	extraVars := buildWitnessPatrolVars(ctx)
 	cfg := PatrolConfig{
 		RoleName:        "witness",
 		PatrolMolName:   constants.MolWitnessPatrol,
@@ -313,13 +314,14 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 		Assignee:        ctx.Rig + "/witness",
 		HeaderEmoji:     constants.EmojiWitness,
 		HeaderTitle:     "Witness Patrol Status",
+		ExtraVars:       extraVars,
 		WorkLoopSteps: []string{
 			"Work through each patrol step in sequence (see checklist below)",
 			"At cycle end:\n   - If context LOW:\n     * Report and loop: `" + cli.Name() + " patrol report --summary \"<brief summary of observations>\"`\n     * This closes the current patrol and starts a new cycle\n   - If context HIGH:\n     * Send handoff: `" + cli.Name() + " handoff -s \"Witness patrol\" -m \"<observations>\"`\n     * Exit cleanly (daemon respawns fresh session)",
 		},
 	}
 	outputPatrolContext(cfg)
-	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig)
+	showFormulaSteps(constants.MolWitnessPatrol, "Patrol Steps", ctx.TownRoot, ctx.Rig, extraVars)
 }
 
 // outputRefineryPatrolContext shows patrol molecule status for the Refinery.
@@ -344,6 +346,20 @@ func outputRefineryPatrolContext(ctx RoleContext) {
 	}
 	outputPatrolContext(cfg)
 	showFormulaStepsFull(constants.MolRefineryPatrol, ctx.TownRoot, ctx.Rig, cfg.ExtraVars)
+}
+
+// buildWitnessPatrolVars returns --var key=value strings for the witness
+// patrol formula. Injects rig name and prefix so the formula can construct
+// agent bead IDs without hardcoding the "gt" prefix (gt-48ay).
+func buildWitnessPatrolVars(ctx RoleContext) []string {
+	var vars []string
+	if ctx.TownRoot == "" || ctx.Rig == "" {
+		return vars
+	}
+	vars = append(vars, fmt.Sprintf("rig=%s", ctx.Rig))
+	prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)
+	vars = append(vars, fmt.Sprintf("prefix=%s", prefix))
+	return vars
 }
 
 // buildRefineryPatrolVars loads rig MQ settings and returns --var key=value

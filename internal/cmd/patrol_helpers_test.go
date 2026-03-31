@@ -18,6 +18,44 @@ import (
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+func TestBuildWitnessPatrolVars_NilContext(t *testing.T) {
+	ctx := RoleContext{}
+	vars := buildWitnessPatrolVars(ctx)
+	if len(vars) != 0 {
+		t.Errorf("expected empty vars for nil context, got %v", vars)
+	}
+}
+
+func TestBuildWitnessPatrolVars_InjectsRigAndPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigDir := filepath.Join(tmpDir, "testrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := RoleContext{
+		TownRoot: tmpDir,
+		Rig:      "testrig",
+	}
+	vars := buildWitnessPatrolVars(ctx)
+	if len(vars) != 2 {
+		t.Fatalf("expected 2 vars (rig, prefix), got %v", vars)
+	}
+	varMap := make(map[string]string)
+	for _, v := range vars {
+		parts := splitFirstEquals(v)
+		if len(parts) == 2 {
+			varMap[parts[0]] = parts[1]
+		}
+	}
+	if got := varMap["rig"]; got != "testrig" {
+		t.Errorf("rig = %q, want %q", got, "testrig")
+	}
+	if got := varMap["prefix"]; got != "gt" {
+		t.Errorf("prefix = %q, want %q (default fallback)", got, "gt")
+	}
+}
+
 func TestBuildRefineryPatrolVars_NilContext(t *testing.T) {
 	ctx := RoleContext{}
 	vars := buildRefineryPatrolVars(ctx)
