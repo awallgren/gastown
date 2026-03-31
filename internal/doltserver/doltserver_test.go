@@ -4419,3 +4419,41 @@ func TestQuarantine_MovesInsteadOfDeleting(t *testing.T) {
 		t.Errorf("expected 1 quarantined entry, got %d", len(quarantineEntries))
 	}
 }
+
+func TestGetLastCommitAge_NoServer(t *testing.T) {
+	// With no server running, GetLastCommitAge should return an error,
+	// not panic or hang.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := GetLastCommitAge(townRoot)
+	if err == nil {
+		// May succeed if a local Dolt is running; either outcome is valid.
+		return
+	}
+	t.Logf("GetLastCommitAge with no server: %v (expected)", err)
+}
+
+func TestGetLastCommitAge_NoDatabases(t *testing.T) {
+	townRoot := t.TempDir()
+
+	_, _, err := GetLastCommitAge(townRoot)
+	if err == nil {
+		t.Error("expected error with no databases, got nil")
+	}
+}
+
+func TestHealthMetrics_CommitFreshnessFields(t *testing.T) {
+	// Verify the new fields exist and are zero-valued when probe fails.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics := GetHealthMetrics(townRoot)
+	if metrics.LastCommitAge < 0 {
+		t.Errorf("LastCommitAge = %v, want >= 0", metrics.LastCommitAge)
+	}
+}

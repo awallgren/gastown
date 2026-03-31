@@ -3378,11 +3378,22 @@ type HealthMetrics struct {
 	DiskUsageHuman string `json:"disk_usage_human"`
 
 	// QueryLatency is the time taken for a SELECT active_branch() round-trip.
+	// TODO: json tag says "ms" but json.Marshal on time.Duration emits nanoseconds.
+	// Consumers extract via .Milliseconds() — the tag is aspirational, not accurate.
 	QueryLatency time.Duration `json:"query_latency_ms"`
 
 	// ReadOnly indicates whether the server is in read-only mode.
 	// When true, the server accepts reads but rejects all writes.
 	ReadOnly bool `json:"read_only"`
+
+	// LastCommitAge is the time since the most recent Dolt commit across all databases.
+	// A large gap (>1 hour) may indicate the server was down or writes are failing.
+	// Note: json.Marshal emits nanoseconds for time.Duration. Consumers should use
+	// ServerHealth.LastCommitAgeSec (float64 seconds) for JSON output instead.
+	LastCommitAge time.Duration `json:"last_commit_age_ns"`
+
+	// LastCommitDB is the database that had the most recent commit.
+	LastCommitDB string `json:"last_commit_db,omitempty"`
 
 	// Healthy indicates whether the server is within acceptable resource limits.
 	Healthy bool `json:"healthy"`
@@ -3438,6 +3449,18 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 		metrics.Healthy = false
 		metrics.Warnings = append(metrics.Warnings,
 			"server is in READ-ONLY mode — requires restart to recover")
+	}
+
+	// 5. Commit freshness: check the most recent commit across all databases.
+	// A gap >1 hour suggests writes are failing or the server was recently down.
+	if commitAge, commitDB, err := GetLastCommitAge(townRoot); err == nil {
+		metrics.LastCommitAge = commitAge
+		metrics.LastCommitDB = commitDB
+		if commitAge > 1*time.Hour {
+			metrics.Warnings = append(metrics.Warnings,
+				fmt.Sprintf("last Dolt commit was %v ago (db: %s) — possible commit gap",
+					commitAge.Round(time.Minute), commitDB))
+		}
 	}
 
 	return metrics
@@ -3609,6 +3632,66 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	}
 
 	return elapsed, nil
+}
+
+// GetLastCommitAge returns the age and database name of the most recent Dolt commit
+// across all databases. This detects commit gaps — periods where no writes persisted.
+//
+// Uses database/sql (like MeasureQueryLatency) rather than dolt subprocess to avoid
+// subprocess startup overhead dominating the measurement.
+func GetLastCommitAge(townRoot string) (time.Duration, string, error) {
+	config := DefaultConfig(townRoot)
+
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.User, config.EffectiveHost(), config.Port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return 0, "", fmt.Errorf("opening mysql connection: %w", err)
+	}
+	defer db.Close()
+
+	db.SetConnMaxLifetime(5 * time.Second)
+	db.SetMaxOpenConns(1)
+
+	databases, err := ListDatabases(townRoot)
+	if err != nil || len(databases) == 0 {
+		return 0, "", fmt.Errorf("listing databases: %w", err)
+	}
+
+	var mostRecent time.Time
+	var mostRecentDB string
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	for _, dbName := range databases {
+		var dateStr string
+		query := fmt.Sprintf("SELECT MAX(date) FROM `%s`.dolt_log LIMIT 1", dbName)
+		if err := db.QueryRowContext(ctx, query).Scan(&dateStr); err != nil {
+			continue // Skip databases that fail (e.g., no dolt_log)
+		}
+		// Dolt's dolt_log.date is DATETIME(6) (microsecond precision). Without
+		// parseTime=true in the DSN, the Go MySQL driver returns this as a string
+		// like "2025-03-28 12:34:56.123456". Go's ".999" fractional format accepts
+		// any number of trailing digits (1-9), correctly parsing both millisecond
+		// and microsecond timestamps. RFC3339 fallback handles version differences.
+		t, err := time.Parse("2006-01-02 15:04:05.999", dateStr)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339, dateStr)
+			if err != nil {
+				continue
+			}
+		}
+		if t.After(mostRecent) {
+			mostRecent = t
+			mostRecentDB = dbName
+		}
+	}
+
+	if mostRecent.IsZero() {
+		return 0, "", fmt.Errorf("no commits found in any database")
+	}
+
+	return time.Since(mostRecent), mostRecentDB, nil
 }
 
 // dirSize returns the total size of a directory tree in bytes.
